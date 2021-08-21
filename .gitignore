@@ -1,0 +1,5 @@
+/target
+/proptest-regressions/
+tarpaulin-report.html
+*~
+Cargo.lock
