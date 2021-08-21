@@ -1,0 +1,12 @@
+[package]
+name = "kismet-cache"
+version = "0.1.0"
+authors = ["Paul Khuong <pvk@pvk.ca>"]
+edition = "2018"
+license = "MIT"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
+proptest-derive = "0.3"
