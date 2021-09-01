@@ -306,7 +306,6 @@ fn test_back_of_list() {
 /// Setting a file read only should... make it read only.
 #[test]
 fn test_set_read_only() {
-    use crate::second_chance::Entry;
     use test_dir::{DirBuilder, FileType, TestDir};
 
     let temp = TestDir::temp().create("old_cache_file", FileType::ZeroFile(10));
