@@ -1,10 +1,10 @@
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::Result;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
 
-use crate::raw_cache;
+use crate::cache_dir::CacheDir;
 use crate::trigger::PeriodicTrigger;
 
 /// How many times we want to trigger maintenance per "capacity"
@@ -15,14 +15,6 @@ const MAINTENANCE_SCALE: usize = 3;
 
 /// Put temporary file in this subdirectory of the cache directory.
 const TEMP_SUBDIR: &str = ".temp";
-
-/// Delete temporary files with mtime older than this age.
-#[cfg(not(test))]
-const MAX_TEMP_FILE_AGE: Duration = Duration::from_secs(3600);
-
-// We want a more eager timeout in tests.
-#[cfg(test)]
-const MAX_TEMP_FILE_AGE: Duration = Duration::from_secs(2);
 
 /// A "plain" cache is a single directory of files.  Given a capacity
 /// of `k` files, we will trigger a second chance maintance roughly
@@ -44,40 +36,26 @@ pub struct PlainCache {
     capacity: usize,
 }
 
-/// Updates the second chance cache state in `base_dir`, and deletes
-/// temporary files in that cache directory.
-fn cleanup_cache_directory(base_dir: &Path, capacity: usize) -> Result<()> {
-    raw_cache::prune(base_dir.to_owned(), capacity)?;
-
-    // Delete old temporary files while we're here.
-    let threshold = match std::time::SystemTime::now().checked_sub(MAX_TEMP_FILE_AGE) {
-        Some(time) => time,
-        None => return Ok(()),
-    };
-
-    let mut temp = base_dir.to_owned();
-    temp.push(TEMP_SUBDIR);
-
-    for dirent in std::fs::read_dir(&temp)?.flatten() {
-        let mut handle = || -> Result<()> {
-            let metadata = dirent.metadata()?;
-            let mtime = metadata.modified()?;
-
-            if mtime < threshold {
-                temp.push(dirent.file_name());
-                let ret = std::fs::remove_file(&temp);
-                temp.pop();
-
-                ret?;
-            }
-
-            Ok(())
-        };
-
-        let _ = handle();
+impl CacheDir for PlainCache {
+    #[inline]
+    fn temp_dir(&self) -> Cow<Path> {
+        Cow::from(&self.temp_dir)
     }
 
-    Ok(())
+    #[inline]
+    fn base_dir(&self) -> Cow<Path> {
+        Cow::from(self.temp_dir.parent().unwrap_or(&self.temp_dir))
+    }
+
+    #[inline]
+    fn trigger(&self) -> &PeriodicTrigger {
+        &self.trigger
+    }
+
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
 }
 
 impl PlainCache {
@@ -101,42 +79,18 @@ impl PlainCache {
         })
     }
 
-    fn base_dir(&self) -> PathBuf {
-        let mut dir = self.temp_dir.clone();
-
-        dir.pop();
-        dir
-    }
-
     /// Returns a read-only file for `name` in the cache directory if
     /// it exists, or None if there is no such file.
     ///
     /// Implicitly "touches" the cached file `name` if it exists.
     pub fn get(&self, name: &str) -> Result<Option<File>> {
-        let mut target = self.base_dir();
-        target.push(name);
-
-        match File::open(&target) {
-            Ok(file) => Ok(Some(file)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
+        CacheDir::get(self, name)
     }
 
     /// Returns a temporary directory suitable for temporary files
     /// that will be published to the cache directory.
-    pub fn temp_dir(&self) -> &Path {
-        &self.temp_dir
-    }
-
-    /// If a periodic cleanup is called for, updates the second chance
-    /// cache state and deletes temporary files in that cache directory.
-    fn maybe_cleanup(&self, base_dir: &Path) -> Result<()> {
-        if self.trigger.event() {
-            cleanup_cache_directory(base_dir, self.capacity)
-        } else {
-            Ok(())
-        }
+    pub fn temp_dir(&self) -> Cow<Path> {
+        CacheDir::temp_dir(self)
     }
 
     /// Inserts or overwrites the file at `value` as `name` in the
@@ -145,11 +99,7 @@ impl PlainCache {
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn set(&self, name: &str, value: &Path) -> Result<()> {
-        let mut dst = self.base_dir();
-
-        self.maybe_cleanup(&dst)?;
-        dst.push(name);
-        raw_cache::insert_or_update(value, &dst)
+        CacheDir::set(self, name, value)
     }
 
     /// Inserts the file at `value` as `name` in the cache directory
@@ -159,21 +109,14 @@ impl PlainCache {
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn put(&self, name: &str, value: &Path) -> Result<()> {
-        let mut dst = self.base_dir();
-
-        self.maybe_cleanup(&dst)?;
-        dst.push(name);
-        raw_cache::insert_or_touch(value, &dst)
+        CacheDir::put(self, name, value)
     }
 
     /// Marks the cached file `name` as newly used, if it exists.
     ///
     /// Succeeds if `name` does not exist anymore.
     pub fn touch(&self, name: &str) -> Result<()> {
-        let mut target = self.base_dir();
-        target.push(name);
-
-        raw_cache::touch(&target)
+        CacheDir::touch(self, name)
     }
 }
 
@@ -193,7 +136,7 @@ fn smoke_test() {
     assert!(std::fs::metadata(temp.path(&format!("{}/garbage", TEMP_SUBDIR))).is_ok());
 
     // Make sure the garbage file is old enough to be deleted.
-    std::thread::sleep(Duration::from_secs_f64(2.5));
+    std::thread::sleep(std::time::Duration::from_secs_f64(2.5));
     let cache = PlainCache::new(temp.path("."), 10).expect("::new must succeed");
 
     for i in 0..20 {
@@ -340,7 +283,7 @@ fn test_touch() {
         cache.put(&name, tmp.path()).expect("put must succeed");
         // Make sure enough time elapses for the next file to get
         // a different timestamp.
-        std::thread::sleep(Duration::from_secs_f64(1.5));
+        std::thread::sleep(std::time::Duration::from_secs_f64(1.5));
     }
 
     // We should still find "0": it's the oldest, but we also keep
