@@ -121,11 +121,14 @@ impl PlainCache {
 }
 
 /// Put 20 files in a 10-file cache.  We should find at least 10, but
-/// fewer than 20.
+/// fewer than 20, and their contents should match.
 #[test]
 fn smoke_test() {
     use tempfile::NamedTempFile;
     use test_dir::{DirBuilder, FileType, TestDir};
+
+    // The payload for file `i` is `PAYLOAD_MULTIPLIER * i`.
+    const PAYLOAD_MULTIPLIER: usize = 13;
 
     // Also leave a file in the temporary subdirectory; we'll check
     // that it gets cleaned up before leaving this function..
@@ -143,13 +146,24 @@ fn smoke_test() {
         let name = format!("{}", i);
 
         let tmp = NamedTempFile::new_in(cache.temp_dir()).expect("new temp file must succeed");
+        std::fs::write(tmp.path(), format!("{}", PAYLOAD_MULTIPLIER * i))
+            .expect("write must succeed");
         cache.put(&name, tmp.path()).expect("put must succeed");
     }
 
     let present: usize = (0..20)
         .map(|i| {
             let name = format!("{}", i);
-            cache.get(&name).expect("get must succeed").is_some() as usize
+            match cache.get(&name).expect("get must succeed") {
+                Some(mut file) => {
+                    use std::io::Read;
+                    let mut buf = Vec::new();
+                    file.read_to_end(&mut buf).expect("read must succeed");
+                    assert_eq!(buf, format!("{}", PAYLOAD_MULTIPLIER * i).into_bytes());
+                    1
+                }
+                None => 0,
+            }
         })
         .sum();
 
