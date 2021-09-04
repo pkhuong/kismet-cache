@@ -619,6 +619,8 @@ fn test_insert_touch_overwrite() {
     // Clear the access bit.
     move_to_back_of_list(&dst).expect("move to back should succeed");
 
+    advance_time();
+
     insert_or_touch(&path, &dst).expect("insert_or_touch should succeed");
     // The old file should be gone.
     assert!(matches!(std::fs::metadata(&path),
