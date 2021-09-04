@@ -133,8 +133,8 @@ pub(crate) trait CacheDir {
 
     /// Marks the cached file `name` as newly used, if it exists.
     ///
-    /// Succeeds if `name` does not exist anymore.
-    fn touch(&self, name: &str) -> Result<()> {
+    /// Returns whether the file `name` exists.
+    fn touch(&self, name: &str) -> Result<bool> {
         let mut target = self.base_dir().into_owned();
         target.push(name);
 

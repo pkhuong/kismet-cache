@@ -50,18 +50,19 @@ fn set_read_only(path: &Path) -> Result<()> {
 }
 
 /// Sets the access bit to true for the file at `path`: the next time
-/// that file is up for eviction, it will get a second chance.
+/// that file is up for eviction, it will get a second chance.  Returns
+/// true if the file was found, false otherwise.
 ///
 /// In most cases, there is no need to explicitly call this function:
 /// the operating system will automatically perform the required
 /// update while opening the file at `path`.
-pub fn touch<P: AsRef<Path>>(path: P) -> Result<()> {
+pub fn touch<P: AsRef<Path>>(path: P) -> Result<bool> {
     match filetime::set_file_atime(path.as_ref(), FileTime::now()) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(true),
         // It's OK if the file we're trying to touch was removed:
         // things do disappear from caches.
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-        err => err,
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -118,7 +119,9 @@ pub fn insert_or_touch<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result
         Ok(()) => {}
         // The destination file already exists; we just have to mark
         // it as accessed.
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => touch(to_path)?,
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            touch(to_path)?;
+        }
         err => err?,
     }
 
@@ -357,7 +360,8 @@ fn test_touch() {
     assert!(!old_entry.accessed());
 
     advance_time();
-    touch(&path).expect("call should succeed");
+    // Should return true: the file exists.
+    assert!(touch(&path).expect("call should succeed"));
     let new_entry = get_entry();
 
     assert_eq!(new_entry.rank(), old_entry.rank());
@@ -370,7 +374,8 @@ fn test_touch_missing() {
     use test_dir::{DirBuilder, TestDir};
 
     let temp = TestDir::temp();
-    touch(&temp.path("absent")).expect("should succeed on missing files");
+    // Should return file: the file does not exist.
+    assert!(!touch(&temp.path("absent")).expect("should succeed on missing files"));
 }
 
 /// Reading a file should set the accessed bit, but not change the rank.

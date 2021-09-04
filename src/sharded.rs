@@ -253,8 +253,8 @@ impl ShardedCache {
 
     /// Marks the cached file `key` as newly used, if it exists.
     ///
-    /// Succeeds even if `key` does not exist.
-    pub fn touch(&self, key: Key) -> Result<()> {
+    /// Returns whether a file for `key` exists in the cache.
+    pub fn touch(&self, key: Key) -> Result<bool> {
         self.shard(self.shard_id(key)).touch(key.name)
     }
 }
@@ -418,7 +418,11 @@ fn test_touch() {
     let cache = ShardedCache::new(temp.path("."), 2, 600).expect("::new must succeed");
 
     for i in 0..2000 {
-        cache.touch(Key::new("0", 0)).expect("touch must succeed");
+        // After the first write, we should find our file.
+        assert_eq!(
+            cache.touch(Key::new("0", 0)).expect("touch must succeed"),
+            i > 0
+        );
 
         let name = format!("{}", i);
 

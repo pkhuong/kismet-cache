@@ -116,8 +116,8 @@ impl PlainCache {
 
     /// Marks the cached file `name` as newly used, if it exists.
     ///
-    /// Succeeds even if `name` does not exist.
-    pub fn touch(&self, name: &str) -> Result<()> {
+    /// Returns whether `name` exists.
+    pub fn touch(&self, name: &str) -> Result<bool> {
         CacheDir::touch(self, name)
     }
 }
@@ -293,13 +293,16 @@ fn test_touch() {
     for i in 0..15 {
         let name = format!("{}", i);
 
-        cache.touch("0").expect("touch must not fail");
+        // After the first write, touch should find our file.
+        assert_eq!(cache.touch("0").expect("touch must not fail"), i > 0);
 
         let tmp = NamedTempFile::new_in(cache.temp_dir()).expect("new temp file must succeed");
         cache.put(&name, tmp.path()).expect("put must succeed");
-        // Make sure enough time elapses for the next file to get
-        // a different timestamp.
-        std::thread::sleep(std::time::Duration::from_secs_f64(1.5));
+        // Make sure enough time elapses for the first file to get
+        // an older timestamp than the rest.
+        if i == 0 {
+            std::thread::sleep(std::time::Duration::from_secs_f64(1.5));
+        }
     }
 
     // We should still find "0": it's the oldest, but we also keep
