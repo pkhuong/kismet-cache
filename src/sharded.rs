@@ -11,6 +11,7 @@ use std::io::Result;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
 use crate::cache_dir::CacheDir;
@@ -26,18 +27,26 @@ const TEMP_SUBDIR: &str = ".temp";
 
 const RANDOM_MULTIPLIER: u64 = 0xf2efdf1111adba6f;
 
-/// Cache keys consist of a filename and a hash value.  The hash
-/// function must be identical for all processes that access the same
-/// sharded cache directory.
+const SECONDARY_RANDOM_MULTIPLIER: u64 = 0xa55e1e02718a6a47;
+
+/// Sharded cache keys consist of a filename and two hash values.  The
+/// two hashes should be computed by distinct functions of the key's
+/// name, and each hash function must be identical for all processes
+/// that access the same sharded cache directory.
 #[derive(Clone, Copy, Debug)]
 pub struct Key<'a> {
     pub name: &'a str,
     pub hash: u64,
+    pub secondary_hash: u64,
 }
 
 impl<'a> Key<'a> {
-    pub fn new(name: &str, hash: u64) -> Key {
-        Key { name, hash }
+    pub fn new(name: &str, hash: u64, secondary_hash: u64) -> Key {
+        Key {
+            name,
+            hash,
+            secondary_hash,
+        }
     }
 }
 
@@ -54,9 +63,9 @@ pub struct ShardedCache {
     // least (most frequent) period between ~1/4 the total capacity,
     // and each shard's capacity.
     trigger: PeriodicTrigger,
-    // Number of shards in the cache.
+    // Number of shards in the cache, at least 2.
     num_shards: usize,
-    // Capacity for each shard (rounded up to an integer).
+    // Capacity for each shard (rounded up to an integer), at least 1.
     shard_capacity: usize,
 }
 
@@ -71,6 +80,29 @@ struct Shard {
     shard_dir: PathBuf,
     trigger: PeriodicTrigger,
     capacity: usize,
+}
+
+impl Shard {
+    /// Returns a shard object for a new shard `id`.
+    fn replace_shard(self, id: usize) -> Shard {
+        let mut shard_dir = self.shard_dir;
+        shard_dir.pop();
+        shard_dir.push(&format_id(id));
+        Shard {
+            shard_dir,
+            trigger: self.trigger,
+            capacity: self.capacity,
+        }
+    }
+
+    /// Returns whether the file `name` exists in this shard.
+    fn file_exists(&mut self, name: &str) -> bool {
+        self.shard_dir.push(name);
+        let result = std::fs::metadata(&self.shard_dir);
+        self.shard_dir.pop();
+
+        result.is_ok()
+    }
 }
 
 impl CacheDir for Shard {
@@ -110,8 +142,9 @@ impl ShardedCache {
         mut num_shards: usize,
         mut total_capacity: usize,
     ) -> Result<ShardedCache> {
-        if num_shards == 0 {
-            num_shards = 1;
+        // We assume at least two shards.
+        if num_shards < 2 {
+            num_shards = 2;
         }
 
         if total_capacity < num_shards {
@@ -152,15 +185,48 @@ impl ShardedCache {
         rand::thread_rng().gen_range(0..self.num_shards)
     }
 
-    /// Returns the shard id for `key`.
-    fn shard_id(&self, key: Key) -> usize {
+    /// Returns the two shard ids for `key`.
+    fn shard_ids(&self, key: Key) -> (usize, usize) {
         // We can't assume the hash is well distributed, so mix it
         // around a bit with a multiplicative hash.
-        let hash = key.hash.wrapping_mul(RANDOM_MULTIPLIER) as u128;
+        let remap = |x: u64, mul: u64| {
+            let hash = x.wrapping_mul(mul) as u128;
+            // Map the hashed hash to a shard id with a fixed point
+            // multiplication.
+            ((self.num_shards as u128 * hash) >> 64) as usize
+        };
 
-        // Map the hashed hash to a shard id with a fixed point
-        // multiplication.
-        ((self.num_shards as u128 * hash) >> 64) as usize
+        // We do not apply a 2-left strategy because our load
+        // estimates can saturate.  When that happens, we want to
+        // revert to sharding based on `key.hash`.
+        let h1 = remap(key.hash, RANDOM_MULTIPLIER);
+        let mut h2 = remap(key.secondary_hash, SECONDARY_RANDOM_MULTIPLIER);
+
+        // We expect two different shard ids.
+        if h1 == h2 {
+            h2 += 1;
+            if h2 >= self.num_shards {
+                h2 = 0;
+            }
+        }
+
+        (h1, h2)
+    }
+
+    /// Reorders two shard ids to return the least loaded first.
+    fn sort_by_load(&self, (h1, h2): (usize, usize)) -> (usize, usize) {
+        let load1 = self.load_estimates[h1].load(Relaxed) as usize;
+        let load2 = self.load_estimates[h2].load(Relaxed) as usize;
+
+        // Clamp loads at the shard capacity: when both shards are
+        // over the capacity, they're equally overloaded.  This also
+        // lets us revert to only using `key.hash` when at capacity.
+        let capacity = self.shard_capacity;
+        if load1.clamp(0, capacity) <= load2.clamp(0, capacity) {
+            (h1, h2)
+        } else {
+            (h2, h1)
+        }
     }
 
     /// Returns a shard object for the `shard_id`.
@@ -179,7 +245,14 @@ impl ShardedCache {
     ///
     /// Implicitly "touches" the cached file if it exists.
     pub fn get(&self, key: Key) -> Result<Option<File>> {
-        self.shard(self.shard_id(key)).get(key.name)
+        let (h1, h2) = self.shard_ids(key);
+        let shard = self.shard(h1);
+
+        if let Some(file) = shard.get(key.name)? {
+            Ok(Some(file))
+        } else {
+            shard.replace_shard(h2).get(key.name)
+        }
     }
 
     /// Returns a temporary directory suitable for temporary files
@@ -189,7 +262,7 @@ impl ShardedCache {
     /// populate `key` for improved behaviour.
     pub fn temp_dir(&self, key: Option<Key>) -> Result<PathBuf> {
         let shard_id = match key {
-            Some(key) => self.shard_id(key),
+            Some(key) => self.sort_by_load(self.shard_ids(key)).0,
             None => self.random_shard_id(),
         };
         let shard = self.shard(shard_id);
@@ -203,8 +276,6 @@ impl ShardedCache {
     /// Updates the load estimate for `shard_id` with the value
     /// returned by `CacheDir::{set,put}`.
     fn update_estimate(&self, shard_id: usize, update: Option<u64>) {
-        use std::sync::atomic::Ordering::Relaxed;
-
         let target = &self.load_estimates[shard_id];
         match update {
             // If we have an updated estimate, overwrite what we have,
@@ -227,27 +298,45 @@ impl ShardedCache {
     }
 
     /// Inserts or overwrites the file at `value` as `key` in the
-    /// sharded cache directory.
+    /// sharded cache directory.  There may be two entries for the
+    /// same key with concurrent `set` or `put` calls.
     ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn set(&self, key: Key, value: &Path) -> Result<()> {
-        let shard_id = self.shard_id(key);
-        let update = self.shard(shard_id).set(key.name, value)?;
-        self.update_estimate(shard_id, update);
+        let (h1, h2) = self.sort_by_load(self.shard_ids(key));
+        let mut shard = self.shard(h2);
+
+        // If the file does not already exist in the secondary shard,
+        // use the primary.
+        if !shard.file_exists(key.name) {
+            shard = shard.replace_shard(h1);
+        }
+
+        let update = shard.set(key.name, value)?;
+        self.update_estimate(h1, update);
         Ok(())
     }
 
-    /// Inserts the file at `value` as `key` in the cache directory
-    /// if there is no such cached entry already, or touches the
-    /// cached file if it already exists.
+    /// Inserts the file at `value` as `key` in the cache directory if
+    /// there is no such cached entry already, or touches the cached
+    /// file if it already exists.  There may be two entries for the
+    /// same key with concurrent `set` or `put` calls.
     ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn put(&self, key: Key, value: &Path) -> Result<()> {
-        let shard_id = self.shard_id(key);
-        let update = self.shard(shard_id).put(key.name, value)?;
-        self.update_estimate(shard_id, update);
+        let (h1, h2) = self.sort_by_load(self.shard_ids(key));
+        let mut shard = self.shard(h2);
+
+        // If the file does not already exist in the secondary shard,
+        // use the primary.
+        if !shard.file_exists(key.name) {
+            shard = shard.replace_shard(h1);
+        }
+
+        let update = shard.put(key.name, value)?;
+        self.update_estimate(h1, update);
         Ok(())
     }
 
@@ -255,7 +344,14 @@ impl ShardedCache {
     ///
     /// Returns whether a file for `key` exists in the cache.
     pub fn touch(&self, key: Key) -> Result<bool> {
-        self.shard(self.shard_id(key)).touch(key.name)
+        let (h1, h2) = self.shard_ids(key);
+        let shard = self.shard(h1);
+
+        if shard.touch(key.name)? {
+            return Ok(true);
+        }
+
+        shard.replace_shard(h2).touch(key.name)
     }
 }
 
@@ -280,7 +376,7 @@ fn smoke_test() {
         std::fs::write(tmp.path(), format!("{}", PAYLOAD_MULTIPLIER * i))
             .expect("write must succeed");
         cache
-            .put(Key::new(&name, i as u64), tmp.path())
+            .put(Key::new(&name, i as u64, i as u64 + 42), tmp.path())
             .expect("put must succeed");
     }
 
@@ -288,7 +384,7 @@ fn smoke_test() {
         .map(|i| {
             let name = format!("{}", i);
             match cache
-                .get(Key::new(&name, i as u64))
+                .get(Key::new(&name, i as u64, i as u64 + 42))
                 .expect("get must succeed")
             {
                 Some(mut file) => {
@@ -324,13 +420,13 @@ fn test_set() {
         tmp.as_file().write_all(b"v1").expect("write must succeed");
 
         cache
-            .set(Key::new("entry", 1), tmp.path())
+            .set(Key::new("entry", 1, 2), tmp.path())
             .expect("initial set must succeed");
     }
 
     {
         let mut cached = cache
-            .get(Key::new("entry", 1))
+            .get(Key::new("entry", 1, 2))
             .expect("must succeed")
             .expect("must be found");
         let mut dst = Vec::new();
@@ -345,13 +441,13 @@ fn test_set() {
         tmp.as_file().write_all(b"v2").expect("write must succeed");
 
         cache
-            .set(Key::new("entry", 1), tmp.path())
+            .set(Key::new("entry", 1, 2), tmp.path())
             .expect("overwrite must succeed");
     }
 
     {
         let mut cached = cache
-            .get(Key::new("entry", 1))
+            .get(Key::new("entry", 1, 2))
             .expect("must succeed")
             .expect("must be found");
         let mut dst = Vec::new();
@@ -377,7 +473,7 @@ fn test_put() {
         tmp.as_file().write_all(b"v1").expect("write must succeed");
 
         cache
-            .set(Key::new("entry", 1), tmp.path())
+            .set(Key::new("entry", 1, 2), tmp.path())
             .expect("initial set must succeed");
     }
 
@@ -388,13 +484,13 @@ fn test_put() {
         tmp.as_file().write_all(b"v2").expect("write must succeed");
 
         cache
-            .put(Key::new("entry", 1), tmp.path())
+            .put(Key::new("entry", 1, 2), tmp.path())
             .expect("put must succeed");
     }
 
     {
         let mut cached = cache
-            .get(Key::new("entry", 1))
+            .get(Key::new("entry", 1, 2))
             .expect("must succeed")
             .expect("must be found");
         let mut dst = Vec::new();
@@ -420,7 +516,9 @@ fn test_touch() {
     for i in 0..2000 {
         // After the first write, we should find our file.
         assert_eq!(
-            cache.touch(Key::new("0", 0)).expect("touch must succeed"),
+            cache
+                .touch(Key::new("0", 0, 42))
+                .expect("touch must succeed"),
             i > 0
         );
 
@@ -431,7 +529,7 @@ fn test_touch() {
         std::fs::write(tmp.path(), format!("{}", PAYLOAD_MULTIPLIER * i))
             .expect("write must succeed");
         cache
-            .put(Key::new(&name, i as u64), tmp.path())
+            .put(Key::new(&name, i as u64, i as u64 + 42), tmp.path())
             .expect("put must succeed");
         if i == 0 {
             // Make sure file "0" is measurably older than the others.
@@ -440,7 +538,7 @@ fn test_touch() {
     }
 
     let mut file = cache
-        .get(Key::new("0", 0))
+        .get(Key::new("0", 0, 42))
         .expect("get must succeed")
         .expect("file must be found");
     let mut buf = Vec::new();
