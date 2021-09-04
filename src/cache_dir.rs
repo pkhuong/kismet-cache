@@ -83,43 +83,52 @@ pub(crate) trait CacheDir {
     /// If a periodic cleanup is called for, updates the second chance
     /// cache state and deletes temporary files in that cache directory.
     ///
-    /// Returns true whenever cleanup was initiated.
-    fn maybe_cleanup(&self, base_dir: &Path) -> Result<bool> {
+    /// Returns the estimated number of files remaining after cleanup
+    /// whenever cleanup was initiated.
+    fn maybe_cleanup(&self, base_dir: &Path) -> Result<Option<u64>> {
         if self.trigger().event() {
-            raw_cache::prune(base_dir.to_owned(), self.capacity())?;
+            let ret = raw_cache::prune(base_dir.to_owned(), self.capacity())?.0;
             // Delete old temporary files while we're here.
             self.cleanup_temp_directory()?;
-            Ok(true)
+            Ok(Some(ret))
         } else {
-            Ok(false)
+            Ok(None)
         }
     }
 
     /// Inserts or overwrites the file at `value` as `name` in the
     /// cache directory.
     ///
+    /// Returns the estimated number of files remaining after cleanup
+    /// whenever cleanup was initiated.
+    ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
-    fn set(&self, name: &str, value: &Path) -> Result<()> {
+    fn set(&self, name: &str, value: &Path) -> Result<Option<u64>> {
         let mut dst = self.base_dir().into_owned();
 
-        self.maybe_cleanup(&dst)?;
+        let ret = self.maybe_cleanup(&dst)?;
         dst.push(name);
-        raw_cache::insert_or_update(value, &dst)
+        raw_cache::insert_or_update(value, &dst)?;
+        Ok(ret)
     }
 
     /// Inserts the file at `value` as `name` in the cache directory
     /// if there is no such cached entry already, or touches the
     /// cached file if it already exists.
     ///
+    /// Returns the estimated number of files remaining after cleanup
+    /// whenever cleanup was initiated.
+    ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
-    fn put(&self, name: &str, value: &Path) -> Result<()> {
+    fn put(&self, name: &str, value: &Path) -> Result<Option<u64>> {
         let mut dst = self.base_dir().into_owned();
 
-        self.maybe_cleanup(&dst)?;
+        let ret = self.maybe_cleanup(&dst)?;
         dst.push(name);
-        raw_cache::insert_or_touch(value, &dst)
+        raw_cache::insert_or_touch(value, &dst)?;
+        Ok(ret)
     }
 
     /// Marks the cached file `name` as newly used, if it exists.

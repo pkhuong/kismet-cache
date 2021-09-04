@@ -199,7 +199,8 @@ impl ShardedCache {
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn set(&self, key: Key, value: &Path) -> Result<()> {
-        self.shard(self.shard_id(key)).set(key.name, value)
+        self.shard(self.shard_id(key)).set(key.name, value)?;
+        Ok(())
     }
 
     /// Inserts the file at `value` as `key` in the cache directory
@@ -209,7 +210,8 @@ impl ShardedCache {
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn put(&self, key: Key, value: &Path) -> Result<()> {
-        self.shard(self.shard_id(key)).put(key.name, value)
+        self.shard(self.shard_id(key)).put(key.name, value)?;
+        Ok(())
     }
 
     /// Marks the cached file `key` as newly used, if it exists.

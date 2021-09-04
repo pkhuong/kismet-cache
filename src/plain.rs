@@ -99,7 +99,8 @@ impl PlainCache {
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn set(&self, name: &str, value: &Path) -> Result<()> {
-        CacheDir::set(self, name, value)
+        CacheDir::set(self, name, value)?;
+        Ok(())
     }
 
     /// Inserts the file at `value` as `name` in the cache directory
@@ -109,7 +110,8 @@ impl PlainCache {
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn put(&self, name: &str, value: &Path) -> Result<()> {
-        CacheDir::put(self, name, value)
+        CacheDir::put(self, name, value)?;
+        Ok(())
     }
 
     /// Marks the cached file `name` as newly used, if it exists.
