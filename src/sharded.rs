@@ -10,6 +10,8 @@ use std::fs::File;
 use std::io::Result;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU8;
+use std::sync::Arc;
 
 use crate::cache_dir::CacheDir;
 use crate::trigger::PeriodicTrigger;
@@ -44,6 +46,8 @@ impl<'a> Key<'a> {
 /// independent second chance cache directory.
 #[derive(Clone, Debug)]
 pub struct ShardedCache {
+    // The current load (number of files) estimate for each shard.
+    load_estimates: Arc<[AtomicU8]>,
     // The parent directory for each shard (cache subdirectory).
     base_dir: PathBuf,
     // Triggers periodic second chance maintenance.  It is set to the
@@ -125,12 +129,15 @@ impl ShardedCache {
             base_dir.pop();
         }
 
+        let mut load_estimates = Vec::with_capacity(num_shards);
+        load_estimates.resize_with(num_shards, || AtomicU8::new(0));
         let shard_capacity =
             (total_capacity / num_shards) + ((total_capacity % num_shards) != 0) as usize;
         let trigger =
             PeriodicTrigger::new(shard_capacity.min(total_capacity / MAINTENANCE_SCALE) as u64);
 
         Ok(ShardedCache {
+            load_estimates: load_estimates.into_boxed_slice().into(),
             base_dir,
             trigger,
             num_shards,
@@ -193,13 +200,41 @@ impl ShardedCache {
         Ok(shard.temp_dir().into_owned())
     }
 
+    /// Updates the load estimate for `shard_id` with the value
+    /// returned by `CacheDir::{set,put}`.
+    fn update_estimate(&self, shard_id: usize, update: Option<u64>) {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let target = &self.load_estimates[shard_id];
+        match update {
+            // If we have an updated estimate, overwrite what we have,
+            // and take the newly added file into account.
+            Some(remaining) => {
+                let update = remaining.clamp(0, u8::MAX as u64 - 1) as u8;
+                target.store(update + 1, Relaxed);
+            }
+            // Otherwise, increment by one with saturation.
+            None => {
+                let _ = target.fetch_update(Relaxed, Relaxed, |i| {
+                    if i < u8::MAX {
+                        Some(i + 1)
+                    } else {
+                        None
+                    }
+                });
+            }
+        };
+    }
+
     /// Inserts or overwrites the file at `value` as `key` in the
     /// sharded cache directory.
     ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn set(&self, key: Key, value: &Path) -> Result<()> {
-        self.shard(self.shard_id(key)).set(key.name, value)?;
+        let shard_id = self.shard_id(key);
+        let update = self.shard(shard_id).set(key.name, value)?;
+        self.update_estimate(shard_id, update);
         Ok(())
     }
 
@@ -210,7 +245,9 @@ impl ShardedCache {
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn put(&self, key: Key, value: &Path) -> Result<()> {
-        self.shard(self.shard_id(key)).put(key.name, value)?;
+        let shard_id = self.shard_id(key);
+        let update = self.shard(shard_id).put(key.name, value)?;
+        self.update_estimate(shard_id, update);
         Ok(())
     }
 
