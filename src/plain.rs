@@ -89,8 +89,8 @@ impl PlainCache {
 
     /// Returns a temporary directory suitable for temporary files
     /// that will be published to the cache directory.
-    pub fn temp_dir(&self) -> Cow<Path> {
-        CacheDir::temp_dir(self)
+    pub fn temp_dir(&self) -> Result<Cow<Path>> {
+        CacheDir::ensure_temp_dir(self)
     }
 
     /// Inserts or overwrites the file at `value` as `name` in the
@@ -147,7 +147,8 @@ fn smoke_test() {
     for i in 0..20 {
         let name = format!("{}", i);
 
-        let tmp = NamedTempFile::new_in(cache.temp_dir()).expect("new temp file must succeed");
+        let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
+            .expect("new temp file must succeed");
         std::fs::write(tmp.path(), format!("{}", PAYLOAD_MULTIPLIER * i))
             .expect("write must succeed");
         cache.put(&name, tmp.path()).expect("put must succeed");
@@ -190,7 +191,8 @@ fn test_set() {
     let cache = PlainCache::new(temp.path("."), 1).expect("::new must succeed");
 
     {
-        let tmp = NamedTempFile::new_in(cache.temp_dir()).expect("new temp file must succeed");
+        let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
+            .expect("new temp file must succeed");
         tmp.as_file().write_all(b"v1").expect("write must succeed");
 
         cache
@@ -210,7 +212,8 @@ fn test_set() {
 
     // Now overwrite; it should take.
     {
-        let tmp = NamedTempFile::new_in(cache.temp_dir()).expect("new temp file must succeed");
+        let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
+            .expect("new temp file must succeed");
         tmp.as_file().write_all(b"v2").expect("write must succeed");
 
         cache
@@ -241,7 +244,8 @@ fn test_put() {
     let cache = PlainCache::new(temp.path("."), 1).expect("::new must succeed");
 
     {
-        let tmp = NamedTempFile::new_in(cache.temp_dir()).expect("new temp file must succeed");
+        let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
+            .expect("new temp file must succeed");
         tmp.as_file().write_all(b"v1").expect("write must succeed");
 
         cache
@@ -261,7 +265,8 @@ fn test_put() {
 
     // Now put again; it shouldn't overwrite.
     {
-        let tmp = NamedTempFile::new_in(cache.temp_dir()).expect("new temp file must succeed");
+        let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
+            .expect("new temp file must succeed");
         tmp.as_file().write_all(b"v2").expect("write must succeed");
 
         cache
@@ -296,7 +301,8 @@ fn test_touch() {
         // After the first write, touch should find our file.
         assert_eq!(cache.touch("0").expect("touch must not fail"), i > 0);
 
-        let tmp = NamedTempFile::new_in(cache.temp_dir()).expect("new temp file must succeed");
+        let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
+            .expect("new temp file must succeed");
         cache.put(&name, tmp.path()).expect("put must succeed");
         // Make sure enough time elapses for the first file to get
         // an older timestamp than the rest.
@@ -328,7 +334,8 @@ fn test_recent_temp_file() {
     let cache = PlainCache::new(temp.path("."), 1).expect("::new must succeed");
 
     for i in 0..2 {
-        let tmp = NamedTempFile::new_in(cache.temp_dir()).expect("new temp file must succeed");
+        let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
+            .expect("new temp file must succeed");
         cache
             .put(&format!("{}", i), tmp.path())
             .expect("put must succeed");

@@ -81,6 +81,14 @@ pub(crate) trait CacheDir {
     /// Returns the cache's directory capacity (in object count).
     fn capacity(&self) -> usize;
 
+    /// Return the path for the cache directory's temporary
+    /// subdirectory, after making sure the directory exists.
+    fn ensure_temp_dir(&self) -> Result<Cow<Path>> {
+        let ret = self.temp_dir();
+        ensure_directory(&ret)?;
+        Ok(ret)
+    }
+
     /// Returns a read-only file for `name` in the cache directory if
     /// it exists, or None if there is no such file.
     ///

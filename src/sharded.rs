@@ -281,7 +281,7 @@ impl ShardedCache {
             shard.cleanup_temp_directory()?;
         }
 
-        Ok(shard.temp_dir().into_owned())
+        Ok(shard.ensure_temp_dir()?.into_owned())
     }
 
     /// Updates the load estimate for `shard_id` with the value
