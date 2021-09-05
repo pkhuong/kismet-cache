@@ -308,15 +308,18 @@ impl ShardedCache {
         };
     }
 
+    /// Performs a second chance maintenance on `shard`.
+    fn force_maintain_shard(&self, shard: Shard) -> Result<()> {
+        let update = shard.maintain()?.clamp(0, u8::MAX as u64) as u8;
+        self.load_estimates[shard.id].store(update, Relaxed);
+        Ok(())
+    }
+
     /// Performs a second chance maintenance on a randomly chosen shard
     /// that is not `base`.
     fn maintain_random_other_shard(&self, base: Shard) -> Result<()> {
         let shard_id = self.other_shard_id(base.id, self.random_shard_id());
-        let shard = base.replace_shard(shard_id);
-
-        let update = shard.maintain()?.clamp(0, u8::MAX as u64) as u8;
-        self.load_estimates[shard_id].store(update, Relaxed);
-        Ok(())
+        self.force_maintain_shard(base.replace_shard(shard_id))
     }
 
     /// Inserts or overwrites the file at `value` as `key` in the
@@ -344,6 +347,10 @@ impl ShardedCache {
         // clean up temporary files.
         if update.is_some() {
             self.maintain_random_other_shard(shard)?;
+        } else if self.load_estimates[h1].load(Relaxed) as usize / 2 > self.shard_capacity {
+            // Otherwise, we can also force a maintenance for this
+            // shard if we're pretty sure it has grown much too big.
+            self.force_maintain_shard(shard)?;
         }
 
         Ok(())
@@ -373,6 +380,8 @@ impl ShardedCache {
         // a second random shard.
         if update.is_some() {
             self.maintain_random_other_shard(shard)?;
+        } else if self.load_estimates[h1].load(Relaxed) as usize / 2 > self.shard_capacity {
+            self.force_maintain_shard(shard)?;
         }
 
         Ok(())
@@ -393,8 +402,8 @@ impl ShardedCache {
     }
 }
 
-/// Put 40 files in a 3x3-file cache.  We should find at least 9, but
-/// fewer than 40, and their contents should match.
+/// Put 200 files in a 3x3-file cache.  We should find at least 9, but
+/// at most 18 (2x the capacity), and their contents should match.
 #[test]
 fn smoke_test() {
     use tempfile::NamedTempFile;
@@ -406,19 +415,26 @@ fn smoke_test() {
     let temp = TestDir::temp();
     let cache = ShardedCache::new(temp.path("."), 3, 9).expect("::new must succeed");
 
-    for i in 0..40 {
+    for i in 0..200 {
         let name = format!("{}", i);
 
         let temp_dir = cache.temp_dir(None).expect("temp_dir must succeed");
         let tmp = NamedTempFile::new_in(temp_dir).expect("new temp file must succeed");
         std::fs::write(tmp.path(), format!("{}", PAYLOAD_MULTIPLIER * i))
             .expect("write must succeed");
-        cache
-            .put(Key::new(&name, i as u64, i as u64 + 42), tmp.path())
-            .expect("put must succeed");
+        // It shouldn't matter if we PUT or SET.
+        if (i % 2) != 0 {
+            cache
+                .put(Key::new(&name, i as u64, i as u64 + 42), tmp.path())
+                .expect("put must succeed");
+        } else {
+            cache
+                .set(Key::new(&name, i as u64, i as u64 + 42), tmp.path())
+                .expect("set must succeed");
+        }
     }
 
-    let present: usize = (0..40)
+    let present: usize = (0..200)
         .map(|i| {
             let name = format!("{}", i);
             match cache
@@ -438,7 +454,7 @@ fn smoke_test() {
         .sum();
 
     assert!(present >= 9);
-    assert!(present < 40);
+    assert!(present <= 18);
 }
 
 /// Publish a file, make sure we can read it, then overwrite, and
