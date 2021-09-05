@@ -136,16 +136,11 @@ impl CacheDir for Shard {
 impl ShardedCache {
     /// Returns a new cache for approximately `total_capacity` files,
     /// stores in `num_shards` subdirectories of `base_dir`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if we fail to create any of the cache
-    /// subdirectories and their `.temp` sub-subdirectories.
     pub fn new(
-        mut base_dir: PathBuf,
+        base_dir: PathBuf,
         mut num_shards: usize,
         mut total_capacity: usize,
-    ) -> Result<ShardedCache> {
+    ) -> ShardedCache {
         // We assume at least two shards.
         if num_shards < 2 {
             num_shards = 2;
@@ -155,17 +150,6 @@ impl ShardedCache {
             total_capacity = num_shards;
         }
 
-        // Create the directory structure eagerly.
-        for i in 0..num_shards {
-            base_dir.push(&format_id(i));
-            base_dir.push(TEMP_SUBDIR);
-
-            std::fs::create_dir_all(&base_dir)?;
-
-            base_dir.pop();
-            base_dir.pop();
-        }
-
         let mut load_estimates = Vec::with_capacity(num_shards);
         load_estimates.resize_with(num_shards, || AtomicU8::new(0));
         let shard_capacity =
@@ -173,13 +157,13 @@ impl ShardedCache {
         let trigger =
             PeriodicTrigger::new(shard_capacity.min(total_capacity / MAINTENANCE_SCALE) as u64);
 
-        Ok(ShardedCache {
+        ShardedCache {
             load_estimates: load_estimates.into_boxed_slice().into(),
             base_dir,
             trigger,
             num_shards,
             shard_capacity,
-        })
+        }
     }
 
     /// Returns a random shard id.
@@ -413,7 +397,7 @@ fn smoke_test() {
     const PAYLOAD_MULTIPLIER: usize = 113;
 
     let temp = TestDir::temp();
-    let cache = ShardedCache::new(temp.path("."), 3, 9).expect("::new must succeed");
+    let cache = ShardedCache::new(temp.path("."), 3, 9);
 
     for i in 0..200 {
         let name = format!("{}", i);
@@ -466,7 +450,7 @@ fn test_set() {
     use test_dir::{DirBuilder, TestDir};
 
     let temp = TestDir::temp();
-    let cache = ShardedCache::new(temp.path("."), 0, 0).expect("::new must succeed");
+    let cache = ShardedCache::new(temp.path("."), 0, 0);
 
     {
         let tmp = NamedTempFile::new_in(cache.temp_dir(None).expect("temp_dir must succeed"))
@@ -519,7 +503,7 @@ fn test_put() {
     use test_dir::{DirBuilder, TestDir};
 
     let temp = TestDir::temp();
-    let cache = ShardedCache::new(temp.path("."), 0, 0).expect("::new must succeed");
+    let cache = ShardedCache::new(temp.path("."), 0, 0);
 
     {
         let tmp = NamedTempFile::new_in(cache.temp_dir(None).expect("temp_dir must succeed"))
@@ -565,7 +549,7 @@ fn test_touch() {
     const PAYLOAD_MULTIPLIER: usize = 113;
 
     let temp = TestDir::temp();
-    let cache = ShardedCache::new(temp.path("."), 2, 600).expect("::new must succeed");
+    let cache = ShardedCache::new(temp.path("."), 2, 600);
 
     for i in 0..2000 {
         // After the first write, we should find our file.

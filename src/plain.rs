@@ -61,22 +61,15 @@ impl CacheDir for PlainCache {
 impl PlainCache {
     /// Returns a new cache for approximately `capacity` files in
     /// `base_dir`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if `$base_dir/.temp` does not exist and we fail
-    /// to create it.
-    pub fn new(base_dir: PathBuf, capacity: usize) -> Result<PlainCache> {
+    pub fn new(base_dir: PathBuf, capacity: usize) -> PlainCache {
         let mut temp_dir = base_dir;
 
         temp_dir.push(TEMP_SUBDIR);
-        std::fs::create_dir_all(&temp_dir)?;
-
-        Ok(PlainCache {
+        PlainCache {
             temp_dir,
             trigger: PeriodicTrigger::new((capacity / MAINTENANCE_SCALE) as u64),
             capacity,
-        })
+        }
     }
 
     /// Returns a read-only file for `name` in the cache directory if
@@ -142,7 +135,7 @@ fn smoke_test() {
 
     // Make sure the garbage file is old enough to be deleted.
     std::thread::sleep(std::time::Duration::from_secs_f64(2.5));
-    let cache = PlainCache::new(temp.path("."), 10).expect("::new must succeed");
+    let cache = PlainCache::new(temp.path("."), 10);
 
     for i in 0..20 {
         let name = format!("{}", i);
@@ -188,7 +181,7 @@ fn test_set() {
     use test_dir::{DirBuilder, TestDir};
 
     let temp = TestDir::temp();
-    let cache = PlainCache::new(temp.path("."), 1).expect("::new must succeed");
+    let cache = PlainCache::new(temp.path("."), 1);
 
     {
         let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
@@ -241,7 +234,7 @@ fn test_put() {
     use test_dir::{DirBuilder, TestDir};
 
     let temp = TestDir::temp();
-    let cache = PlainCache::new(temp.path("."), 1).expect("::new must succeed");
+    let cache = PlainCache::new(temp.path("."), 1);
 
     {
         let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
@@ -293,7 +286,7 @@ fn test_touch() {
     use test_dir::{DirBuilder, TestDir};
 
     let temp = TestDir::temp();
-    let cache = PlainCache::new(temp.path("."), 5).expect("::new must succeed");
+    let cache = PlainCache::new(temp.path("."), 5);
 
     for i in 0..15 {
         let name = format!("{}", i);
@@ -331,7 +324,7 @@ fn test_recent_temp_file() {
     // The garbage file must exist.
     assert!(std::fs::metadata(temp.path(&format!("{}/garbage", TEMP_SUBDIR))).is_ok());
 
-    let cache = PlainCache::new(temp.path("."), 1).expect("::new must succeed");
+    let cache = PlainCache::new(temp.path("."), 1);
 
     for i in 0..2 {
         let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
