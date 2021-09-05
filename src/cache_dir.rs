@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io::Result;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::raw_cache;
@@ -80,6 +81,15 @@ pub(crate) trait CacheDir {
         cleanup_temporary_directory(self.temp_dir())
     }
 
+    /// Updates the second chance cache state and deletes temporary
+    /// files in the `base_dir` cache directory.
+    fn definitely_cleanup(&self, base_dir: PathBuf) -> Result<u64> {
+        let ret = raw_cache::prune(base_dir, self.capacity())?.0;
+        // Delete old temporary files while we're here.
+        self.cleanup_temp_directory()?;
+        Ok(ret)
+    }
+
     /// If a periodic cleanup is called for, updates the second chance
     /// cache state and deletes temporary files in that cache directory.
     ///
@@ -87,13 +97,18 @@ pub(crate) trait CacheDir {
     /// whenever cleanup was initiated.
     fn maybe_cleanup(&self, base_dir: &Path) -> Result<Option<u64>> {
         if self.trigger().event() {
-            let ret = raw_cache::prune(base_dir.to_owned(), self.capacity())?.0;
-            // Delete old temporary files while we're here.
-            self.cleanup_temp_directory()?;
-            Ok(Some(ret))
+            Ok(Some(self.definitely_cleanup(base_dir.to_owned())?))
         } else {
             Ok(None)
         }
+    }
+
+    /// Updates the second chance cache state and deletes temporary
+    /// files in the `base_dir` cache directory.
+    ///
+    /// Returns the estimated number of files remaining after cleanup.
+    fn maintain(&self) -> Result<u64> {
+        self.definitely_cleanup(self.base_dir().into_owned())
     }
 
     /// Inserts or overwrites the file at `value` as `name` in the
