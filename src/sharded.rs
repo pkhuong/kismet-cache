@@ -77,6 +77,7 @@ fn format_id(shard: usize) -> String {
 /// We create short-lived Shard objects whenever we want to work with
 /// a given shard of the sharded cache dir.
 struct Shard {
+    id: usize,
     shard_dir: PathBuf,
     trigger: PeriodicTrigger,
     capacity: usize,
@@ -89,6 +90,7 @@ impl Shard {
         shard_dir.pop();
         shard_dir.push(&format_id(id));
         Shard {
+            id,
             shard_dir,
             trigger: self.trigger,
             capacity: self.capacity,
@@ -240,6 +242,7 @@ impl ShardedCache {
         let mut dir = self.base_dir.clone();
         dir.push(&format_id(shard_id));
         Shard {
+            id: shard_id,
             shard_dir: dir,
             trigger: self.trigger,
             capacity: self.shard_capacity,
