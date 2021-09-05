@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::fs::File;
+use std::io::ErrorKind;
 use std::io::Result;
 use std::path::Path;
 use std::path::PathBuf;
@@ -21,8 +22,6 @@ const MAX_TEMP_FILE_AGE: Duration = Duration::from_secs(2);
 ///
 /// It is not an error if `temp_dir` does not exist.
 fn cleanup_temporary_directory(temp_dir: Cow<Path>) -> Result<()> {
-    use std::io::ErrorKind;
-
     let threshold = match std::time::SystemTime::now().checked_sub(MAX_TEMP_FILE_AGE) {
         Some(time) => time,
         None => return Ok(()),
@@ -93,7 +92,12 @@ pub(crate) trait CacheDir {
     /// Updates the second chance cache state and deletes temporary
     /// files in the `base_dir` cache directory.
     fn definitely_cleanup(&self, base_dir: PathBuf) -> Result<u64> {
-        let ret = raw_cache::prune(base_dir, self.capacity())?.0;
+        let ret = match raw_cache::prune(base_dir, self.capacity()) {
+            Ok((estimate, _deleted)) => estimate,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+
         // Delete old temporary files while we're here.
         self.cleanup_temp_directory()?;
         Ok(ret)
