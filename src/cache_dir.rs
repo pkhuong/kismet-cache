@@ -18,14 +18,23 @@ const MAX_TEMP_FILE_AGE: Duration = Duration::from_secs(2);
 
 /// Deletes any file with mtime older than `MAX_TEMP_FILE_AGE` in
 /// `temp_dir`.
+///
+/// It is not an error if `temp_dir` does not exist.
 fn cleanup_temporary_directory(temp_dir: Cow<Path>) -> Result<()> {
+    use std::io::ErrorKind;
+
     let threshold = match std::time::SystemTime::now().checked_sub(MAX_TEMP_FILE_AGE) {
         Some(time) => time,
         None => return Ok(()),
     };
 
+    let iter = match std::fs::read_dir(&temp_dir) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        x => x?,
+    };
+
     let mut temp = temp_dir.into_owned();
-    for dirent in std::fs::read_dir(&temp)?.flatten() {
+    for dirent in iter.flatten() {
         let mut handle = || -> Result<()> {
             let metadata = dirent.metadata()?;
             let mtime = metadata.modified()?;
