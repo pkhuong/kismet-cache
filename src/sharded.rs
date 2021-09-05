@@ -20,7 +20,7 @@ use crate::trigger::PeriodicTrigger;
 /// We will aim to trigger maintenance at least `MAINTENANCE_SCALE`
 /// times per total capacity inserts or updates, and at least once per
 /// shard capacity inserts or updates.
-const MAINTENANCE_SCALE: usize = 4;
+const MAINTENANCE_SCALE: usize = 2;
 
 /// Put temporary file in this subdirectory of the cache directory.
 const TEMP_SUBDIR: &str = ".temp";
@@ -60,8 +60,10 @@ pub struct ShardedCache {
     // The parent directory for each shard (cache subdirectory).
     base_dir: PathBuf,
     // Triggers periodic second chance maintenance.  It is set to the
-    // least (most frequent) period between ~1/4 the total capacity,
-    // and each shard's capacity.
+    // least (most frequent) period between ~1/2 the total capacity,
+    // and each shard's capacity.  Whenever the `trigger` fires, we
+    // will maintain two different shards: the one we just updated,
+    // and another randomly chosen shard.
     trigger: PeriodicTrigger,
     // Number of shards in the cache, at least 2.
     num_shards: usize,
@@ -306,6 +308,17 @@ impl ShardedCache {
         };
     }
 
+    /// Performs a second chance maintenance on a randomly chosen shard
+    /// that is not `base`.
+    fn maintain_random_other_shard(&self, base: Shard) -> Result<()> {
+        let shard_id = self.other_shard_id(base.id, self.random_shard_id());
+        let shard = base.replace_shard(shard_id);
+
+        let update = shard.maintain()?.clamp(0, u8::MAX as u64) as u8;
+        self.load_estimates[shard_id].store(update, Relaxed);
+        Ok(())
+    }
+
     /// Inserts or overwrites the file at `value` as `key` in the
     /// sharded cache directory.  There may be two entries for the
     /// same key with concurrent `set` or `put` calls.
@@ -324,6 +337,15 @@ impl ShardedCache {
 
         let update = shard.set(key.name, value)?;
         self.update_estimate(h1, update);
+
+        // If we performed maintenance on this shard, also maintain
+        // a second random shard: writes might be concentrated on a
+        // few shard, but we can still spread the love, if only to
+        // clean up temporary files.
+        if update.is_some() {
+            self.maintain_random_other_shard(shard)?;
+        }
+
         Ok(())
     }
 
@@ -346,6 +368,13 @@ impl ShardedCache {
 
         let update = shard.put(key.name, value)?;
         self.update_estimate(h1, update);
+
+        // If we performed maintenance on this shard, also maintain
+        // a second random shard.
+        if update.is_some() {
+            self.maintain_random_other_shard(shard)?;
+        }
+
         Ok(())
     }
 
