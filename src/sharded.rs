@@ -185,6 +185,21 @@ impl ShardedCache {
         rand::thread_rng().gen_range(0..self.num_shards)
     }
 
+    /// Given shard ids `base` and `other`, returns a new shard id for
+    /// `other` such that `base` and `other` do not collide.
+    fn other_shard_id(&self, base: usize, mut other: usize) -> usize {
+        if base != other {
+            return other;
+        }
+
+        other += 1;
+        if other < self.num_shards {
+            other
+        } else {
+            0
+        }
+    }
+
     /// Returns the two shard ids for `key`.
     fn shard_ids(&self, key: Key) -> (usize, usize) {
         // We can't assume the hash is well distributed, so mix it
@@ -200,17 +215,8 @@ impl ShardedCache {
         // estimates can saturate.  When that happens, we want to
         // revert to sharding based on `key.hash`.
         let h1 = remap(key.hash, RANDOM_MULTIPLIER);
-        let mut h2 = remap(key.secondary_hash, SECONDARY_RANDOM_MULTIPLIER);
-
-        // We expect two different shard ids.
-        if h1 == h2 {
-            h2 += 1;
-            if h2 >= self.num_shards {
-                h2 = 0;
-            }
-        }
-
-        (h1, h2)
+        let h2 = remap(key.secondary_hash, SECONDARY_RANDOM_MULTIPLIER);
+        (h1, self.other_shard_id(h1, h2))
     }
 
     /// Reorders two shard ids to return the least loaded first.
