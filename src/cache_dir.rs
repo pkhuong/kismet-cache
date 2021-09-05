@@ -17,6 +17,19 @@ const MAX_TEMP_FILE_AGE: Duration = Duration::from_secs(3600);
 #[cfg(test)]
 const MAX_TEMP_FILE_AGE: Duration = Duration::from_secs(2);
 
+/// Attempts to make sure `path` is a directory that exists.  Unlike
+/// `std::fs::create_dir_all`, this function is optimised for the case
+/// where `path` is already a directory.
+fn ensure_directory(path: &Path) -> Result<()> {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.file_type().is_dir() {
+            return Ok(());
+        }
+    }
+
+    std::fs::create_dir_all(path)
+}
+
 /// Deletes any file with mtime older than `MAX_TEMP_FILE_AGE` in
 /// `temp_dir`.
 ///
@@ -136,6 +149,7 @@ pub(crate) trait CacheDir {
         let mut dst = self.base_dir().into_owned();
 
         let ret = self.maybe_cleanup(&dst)?;
+        ensure_directory(&dst)?;
         dst.push(name);
         raw_cache::insert_or_update(value, &dst)?;
         Ok(ret)
@@ -154,6 +168,7 @@ pub(crate) trait CacheDir {
         let mut dst = self.base_dir().into_owned();
 
         let ret = self.maybe_cleanup(&dst)?;
+        ensure_directory(&dst)?;
         dst.push(name);
         raw_cache::insert_or_touch(value, &dst)?;
         Ok(ret)
