@@ -56,14 +56,18 @@ fn set_read_only(path: &Path) -> Result<()> {
 /// In most cases, there is no need to explicitly call this function:
 /// the operating system will automatically perform the required
 /// update while opening the file at `path`.
-pub fn touch<P: AsRef<Path>>(path: P) -> Result<bool> {
-    match filetime::set_file_atime(path.as_ref(), FileTime::now()) {
-        Ok(()) => Ok(true),
-        // It's OK if the file we're trying to touch was removed:
-        // things do disappear from caches.
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
+pub fn touch(path: impl AsRef<Path>) -> Result<bool> {
+    fn run(path: &Path) -> Result<bool> {
+        match filetime::set_file_atime(path, FileTime::now()) {
+            Ok(()) => Ok(true),
+            // It's OK if the file we're trying to touch was removed:
+            // things do disappear from caches.
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
     }
+
+    run(path.as_ref())
 }
 
 /// Consumes the file `from` and publishes it to the raw cache file
@@ -79,14 +83,17 @@ pub fn touch<P: AsRef<Path>>(path: P) -> Result<bool> {
 /// `sync_data`ing the contents of `from`.  This function does not
 /// fsync the cache directory itself: it's a cache, so stale contents
 /// are assumed safe.
-pub fn insert_or_update<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<()> {
-    let from_path = from.as_ref();
-    // Move to the back of the list before publishing: if a reader
-    // comes in right away, we want it to set the access bit.
-    move_to_back_of_list(from_path)?;
-    set_read_only(from_path)?;
-    std::fs::rename(from_path, to)?;
-    ensure_file_removed(from_path)
+pub fn insert_or_update(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
+    fn run(from: &Path, to: &Path) -> Result<()> {
+        // Move to the back of the list before publishing: if a reader
+        // comes in right away, we want it to set the access bit.
+        move_to_back_of_list(from)?;
+        set_read_only(from)?;
+        std::fs::rename(from, to)?;
+        ensure_file_removed(from)
+    }
+
+    run(from.as_ref(), to.as_ref())
 }
 
 /// Consumes the file `from` and publishes it to the raw cache file
@@ -106,35 +113,38 @@ pub fn insert_or_update<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Resul
 /// `sync_data`ing the contents of `from`.  This function does not
 /// fsync the cache directory itself: it's a cache, so stale contents
 /// are assumed safe.
-pub fn insert_or_touch<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<()> {
-    let from_path = from.as_ref();
-    let to_path = to.as_ref();
-
-    // Optimise for the successful publication case: we expect callers
-    // to only `insert_or_touch` after a failed lookup, so the `link`
-    // call will only fail with EEXIST if another writer raced with us.
-    move_to_back_of_list(from_path)?;
-    set_read_only(from_path)?;
-    match std::fs::hard_link(from_path, to_path) {
-        Ok(()) => {}
-        // The destination file already exists; we just have to mark
-        // it as accessed.
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-            touch(to_path)?;
+pub fn insert_or_touch(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
+    fn run(from: &Path, to: &Path) -> Result<()> {
+        // Optimise for the successful publication case: we expect callers
+        // to only `insert_or_touch` after a failed lookup, so the `link`
+        // call will only fail with EEXIST if another writer raced with us.
+        move_to_back_of_list(from)?;
+        set_read_only(from)?;
+        match std::fs::hard_link(from, to) {
+            Ok(()) => {}
+            // The destination file already exists; we just have to mark
+            // it as accessed.
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                touch(to)?;
+            }
+            err => err?,
         }
-        err => err?,
+
+        ensure_file_removed(from)
     }
 
-    ensure_file_removed(from_path)
+    run(from.as_ref(), to.as_ref())
 }
 
 impl second_chance::Entry for CachedFile {
     type Rank = FileTime;
 
+    #[inline]
     fn rank(&self) -> FileTime {
         self.mtime
     }
 
+    #[inline]
     fn accessed(&self) -> bool {
         self.accessed
     }
