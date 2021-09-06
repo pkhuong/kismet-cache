@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::cache_dir::CacheDir;
 use crate::trigger::PeriodicTrigger;
+use crate::Key;
 
 /// We will aim to trigger maintenance at least `MAINTENANCE_SCALE`
 /// times per total capacity inserts or updates, and at least once per
@@ -28,27 +29,6 @@ const TEMP_SUBDIR: &str = ".temp";
 const RANDOM_MULTIPLIER: u64 = 0xf2efdf1111adba6f;
 
 const SECONDARY_RANDOM_MULTIPLIER: u64 = 0xa55e1e02718a6a47;
-
-/// Sharded cache keys consist of a filename and two hash values.  The
-/// two hashes should be computed by distinct functions of the key's
-/// name, and each hash function must be identical for all processes
-/// that access the same sharded cache directory.
-#[derive(Clone, Copy, Debug)]
-pub struct Key<'a> {
-    pub name: &'a str,
-    pub hash: u64,
-    pub secondary_hash: u64,
-}
-
-impl<'a> Key<'a> {
-    pub fn new(name: &str, hash: u64, secondary_hash: u64) -> Key {
-        Key {
-            name,
-            hash,
-            secondary_hash,
-        }
-    }
-}
 
 /// A sharded cache is a hash-sharded directory of cache
 /// subdirectories.  Each subdirectory is managed as an
