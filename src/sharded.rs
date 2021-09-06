@@ -255,7 +255,7 @@ impl ShardedCache {
     ///
     /// When this temporary file will be published at a known `Key`,
     /// populate `key` for improved behaviour.
-    pub fn temp_dir(&self, key: Option<Key>) -> Result<PathBuf> {
+    pub fn temp_dir(&self, key: Option<Key>) -> Result<Cow<Path>> {
         let shard_id = match key {
             Some(key) => self.sort_by_load(self.shard_ids(key)).0,
             None => self.random_shard_id(),
@@ -265,7 +265,7 @@ impl ShardedCache {
             shard.cleanup_temp_directory()?;
         }
 
-        Ok(shard.ensure_temp_dir()?.into_owned())
+        Ok(Cow::from(shard.ensure_temp_dir()?.into_owned()))
     }
 
     /// Updates the load estimate for `shard_id` with the value
