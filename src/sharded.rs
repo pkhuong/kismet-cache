@@ -17,14 +17,12 @@ use std::sync::Arc;
 use crate::cache_dir::CacheDir;
 use crate::trigger::PeriodicTrigger;
 use crate::Key;
+use crate::KISMET_TEMPORARY_SUBDIRECTORY as TEMP_SUBDIR;
 
 /// We will aim to trigger maintenance at least `MAINTENANCE_SCALE`
 /// times per total capacity inserts or updates, and at least once per
 /// shard capacity inserts or updates.
 const MAINTENANCE_SCALE: usize = 2;
-
-/// Put temporary file in this subdirectory of the cache directory.
-const TEMP_SUBDIR: &str = ".temp";
 
 const RANDOM_MULTIPLIER: u64 = 0xf2efdf1111adba6f;
 

@@ -6,15 +6,13 @@ use std::path::PathBuf;
 
 use crate::cache_dir::CacheDir;
 use crate::trigger::PeriodicTrigger;
+use crate::KISMET_TEMPORARY_SUBDIRECTORY as TEMP_SUBDIR;
 
 /// How many times we want to trigger maintenance per "capacity"
 /// inserts.  For example, `MAINTENANCE_SCALE = 3` means we will
 /// expect to trigger maintenance after inserting or updating
 /// ~capacity / 3 files in the cache.
 const MAINTENANCE_SCALE: usize = 3;
-
-/// Put temporary file in this subdirectory of the cache directory.
-const TEMP_SUBDIR: &str = ".temp";
 
 /// A "plain" cache is a single directory of files.  Given a capacity
 /// of `k` files, we will trigger a second chance maintance roughly

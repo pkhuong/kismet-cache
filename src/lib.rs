@@ -16,6 +16,10 @@ pub use stack::CacheBuilder;
 pub use stack::CacheHit;
 pub use stack::CacheHitAction;
 
+/// Kismet cache directories put temporary files under this
+/// subdirectory.
+pub const KISMET_TEMPORARY_SUBDIRECTORY: &str = ".kismet_temp";
+
 /// Sharded cache keys consist of a filename and two hash values.  The
 /// two hashes should be computed by distinct functions of the key's
 /// name, and each hash function must be identical for all processes
