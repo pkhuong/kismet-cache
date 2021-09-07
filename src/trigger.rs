@@ -104,7 +104,6 @@ impl PeriodicTrigger {
     /// Observes count "events".  Returns whether the periodic trigger
     /// fired for any of these events (i.e., whether the caller should
     /// invoke the periodic behaviour).
-    #[allow(dead_code)]
     #[inline(always)]
     pub fn weighted_event(self, count: u64) -> bool {
         observe(self.scale.saturating_mul(count))
