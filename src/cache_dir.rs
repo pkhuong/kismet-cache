@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::fs::File;
+use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Result;
 use std::path::Path;
@@ -68,6 +69,30 @@ fn cleanup_temporary_directory(temp_dir: Cow<Path>) -> Result<()> {
     Ok(())
 }
 
+/// Returns `name` if it non-empty and does not start with a reserved
+/// byte (dot, slash, backslash).
+fn validate_file_name(name: &str) -> Result<&str> {
+    match name.as_bytes().get(0) {
+        None => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "kismet cached file name must not be empty",
+        )),
+        Some(b'.') => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "kismet cached file name must not start with a dot",
+        )),
+        Some(b'/') => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "kismet cached file name must not starts with a forward slash",
+        )),
+        Some(b'\\') => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "kismet cached file name must not starts with a backslash",
+        )),
+        Some(_) => Ok(name),
+    }
+}
+
 /// The `CacheDir` trait drives the actual management of a single
 /// cache directory.
 pub(crate) trait CacheDir {
@@ -94,6 +119,7 @@ pub(crate) trait CacheDir {
     ///
     /// Implicitly "touches" the cached file `name` if it exists.
     fn get(&self, name: &str) -> Result<Option<File>> {
+        let name = validate_file_name(name)?;
         let mut target = self.base_dir().into_owned();
         target.push(name);
 
@@ -154,6 +180,7 @@ pub(crate) trait CacheDir {
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     fn set(&self, name: &str, value: &Path) -> Result<Option<u64>> {
+        let name = validate_file_name(name)?;
         let mut dst = self.base_dir().into_owned();
 
         let ret = self.maybe_cleanup(&dst)?;
@@ -173,6 +200,7 @@ pub(crate) trait CacheDir {
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     fn put(&self, name: &str, value: &Path) -> Result<Option<u64>> {
+        let name = validate_file_name(name)?;
         let mut dst = self.base_dir().into_owned();
 
         let ret = self.maybe_cleanup(&dst)?;
@@ -186,9 +214,83 @@ pub(crate) trait CacheDir {
     ///
     /// Returns whether the file `name` exists.
     fn touch(&self, name: &str) -> Result<bool> {
+        let name = validate_file_name(name)?;
         let mut target = self.base_dir().into_owned();
         target.push(name);
 
         raw_cache::touch(&target)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::borrow::Cow;
+    use std::io::ErrorKind;
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    use crate::cache_dir::CacheDir;
+    use crate::trigger::PeriodicTrigger;
+
+    struct DummyCacheDir {}
+
+    impl CacheDir for DummyCacheDir {
+        #[cfg(not(tarpaulin_include))]
+        fn temp_dir(&self) -> Cow<Path> {
+            unreachable!("should not be called")
+        }
+
+        #[cfg(not(tarpaulin_include))]
+        fn base_dir(&self) -> Cow<Path> {
+            unreachable!("should not be called")
+        }
+
+        #[cfg(not(tarpaulin_include))]
+        fn trigger(&self) -> &PeriodicTrigger {
+            unreachable!("should not be called")
+        }
+
+        #[cfg(not(tarpaulin_include))]
+        fn capacity(&self) -> usize {
+            unreachable!("should not be called")
+        }
+    }
+
+    // Passing a bad file name to `get` should abort immediately.
+    #[test]
+    fn test_bad_get() {
+        let cache = DummyCacheDir {};
+
+        assert!(matches!(cache.get(""),
+                         Err(e) if e.kind() == ErrorKind::InvalidInput));
+    }
+
+    // Passing a bad file name to `set` should abort immediately.
+    #[test]
+    fn test_bad_set() {
+        let cache = DummyCacheDir {};
+
+        let path: PathBuf = "/tmp/foo".into();
+        assert!(matches!(cache.set(".foo", &path),
+                         Err(e) if e.kind() == ErrorKind::InvalidInput));
+    }
+
+    // Passing a bad file name to `put` should abort immediately.
+    #[test]
+    fn test_bad_put() {
+        let cache = DummyCacheDir {};
+
+        let path: PathBuf = "/tmp/foo".into();
+        assert!(matches!(cache.set("/asd", &path),
+                         Err(e) if e.kind() == ErrorKind::InvalidInput));
+    }
+
+    // Passing a bad file name to `touch` should abort immediately.
+    #[test]
+    fn test_bad_touch() {
+        let cache = DummyCacheDir {};
+
+        assert!(matches!(cache.touch("\\.test"),
+                         Err(e) if e.kind() == ErrorKind::InvalidInput));
     }
 }

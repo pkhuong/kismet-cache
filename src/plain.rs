@@ -71,7 +71,10 @@ impl PlainCache {
     }
 
     /// Returns a read-only file for `name` in the cache directory if
-    /// it exists, or None if there is no such file.
+    /// it exists, or None if there is no such file.  Fails with
+    /// `ErrorKind::InvalidInput` if `name` is invalid (empty, or
+    /// starts with a dot or a forward or back slash).
+    ///
     ///
     /// Implicitly "touches" the cached file `name` if it exists.
     pub fn get(&self, name: &str) -> Result<Option<File>> {
@@ -85,7 +88,9 @@ impl PlainCache {
     }
 
     /// Inserts or overwrites the file at `value` as `name` in the
-    /// cache directory.
+    /// cache directory.  Fails with `ErrorKind::InvalidInput` if
+    /// `name` is invalid (empty, or starts with a dot or a forward
+    /// or back slash).
     ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
@@ -96,7 +101,9 @@ impl PlainCache {
 
     /// Inserts the file at `value` as `name` in the cache directory
     /// if there is no such cached entry already, or touches the
-    /// cached file if it already exists.
+    /// cached file if it already exists.  Fails with
+    /// `ErrorKind::InvalidInput` if `name` is invalid (empty, or
+    /// starts with a dot or a forward or back slash).
     ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
@@ -106,6 +113,8 @@ impl PlainCache {
     }
 
     /// Marks the cached file `name` as newly used, if it exists.
+    /// Fails with `ErrorKind::InvalidInput` if `name` is invalid
+    /// (empty, or starts with a dot or a forward or back slash).
     ///
     /// Returns whether `name` exists.
     pub fn touch(&self, name: &str) -> Result<bool> {

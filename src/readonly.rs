@@ -138,6 +138,9 @@ impl ReadOnlyCache {
     /// `ReadOnlyCache` will query each constituent cache in order of
     /// registration, and return a read-only file for the first hit.
     ///
+    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// (empty, or starts with a dot or a forward or back slash).
+    ///
     /// Returns `None` if no file for `key` can be found in any of the
     /// constituent caches, and bubbles up the first I/O error
     /// encountered, if any.
@@ -162,6 +165,9 @@ impl ReadOnlyCache {
     /// Marks a cache entry for `key` as accessed (read).  The
     /// `ReadOnlyCache` will touch the same file that would be returned
     /// by `get`.
+    ///
+    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// (empty, or starts with a dot or a forward or back slash).
     ///
     /// Returns whether a file for `key` could be found, and bubbles
     /// up the first I/O error encountered, if any.

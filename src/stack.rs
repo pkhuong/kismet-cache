@@ -225,6 +225,9 @@ impl Cache {
     /// additional read-only cache, in definition order, and return a
     /// read-only file for the first hit.
     ///
+    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// (empty, or starts with a dot or a forward or back slash).
+    ///
     /// Returns `None` if no file for `key` can be found in any of the
     /// constituent caches, and bubbles up the first I/O error
     /// encountered, if any.
@@ -253,6 +256,9 @@ impl Cache {
     /// Attempts to find a cache entry for `key`.  If there is none,
     /// populates the cache with a file filled by `populate`.  Returns
     /// a file in all cases (unless the call fails with an error).
+    ///
+    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// (empty, or starts with a dot or a forward or back slash).
     pub fn ensure<'a>(
         &self,
         key: impl Into<Key<'a>>,
@@ -269,6 +275,9 @@ impl Cache {
     /// populates the write cache (if possible) with a file, once
     /// filled by `populate`; otherwise obeys the value returned by
     /// `judge` to determine what to do with the hit.
+    ///
+    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// (empty, or starts with a dot or a forward or back slash).
     ///
     /// When we need to populate a new file, `populate` is called with
     /// a mutable reference to the destination file, and the old
@@ -350,6 +359,9 @@ impl Cache {
     /// write cache directory.  This will always fail with
     /// `Unsupported` if no write cache was defined.
     ///
+    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// (empty, or starts with a dot or a forward or back slash).
+    ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn set<'a>(&self, key: impl Into<Key<'a>>, value: impl AsRef<Path>) -> Result<()> {
@@ -366,6 +378,9 @@ impl Cache {
     /// there is no such cached entry already, or touches the cached
     /// file if it already exists.
     ///
+    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// (empty, or starts with a dot or a forward or back slash).
+    ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     pub fn put<'a>(&self, key: impl Into<Key<'a>>, value: impl AsRef<Path>) -> Result<()> {
@@ -380,6 +395,9 @@ impl Cache {
 
     /// Marks a cache entry for `key` as accessed (read).  The `Cache`
     /// will touch the same file that would be returned by `get`.
+    ///
+    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// (empty, or starts with a dot or a forward or back slash).
     ///
     /// Returns whether a file for `key` could be found, and bubbles
     /// up the first I/O error encountered, if any.

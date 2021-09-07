@@ -215,6 +215,8 @@ impl ShardedCache {
 
     /// Returns a read-only file for `key` in the shard cache
     /// directory if it exists, or None if there is no such file.
+    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// (empty, or starts with a dot or a forward or back slash).
     ///
     /// Implicitly "touches" the cached file if it exists.
     pub fn get(&self, key: Key) -> Result<Option<File>> {
@@ -286,7 +288,9 @@ impl ShardedCache {
 
     /// Inserts or overwrites the file at `value` as `key` in the
     /// sharded cache directory.  There may be two entries for the
-    /// same key with concurrent `set` or `put` calls.
+    /// same key with concurrent `set` or `put` calls.  Fails with
+    /// `ErrorKind::InvalidInput` if `key.name` is invalid (empty, or
+    /// starts with a dot or a forward or back slash).
     ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
@@ -321,7 +325,9 @@ impl ShardedCache {
     /// Inserts the file at `value` as `key` in the cache directory if
     /// there is no such cached entry already, or touches the cached
     /// file if it already exists.  There may be two entries for the
-    /// same key with concurrent `set` or `put` calls.
+    /// same key with concurrent `set` or `put` calls.  Fails with
+    /// `ErrorKind::InvalidInput` if `key.name` is invalid (empty, or
+    /// starts with a dot or a forward or back slash).
     ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
@@ -350,6 +356,8 @@ impl ShardedCache {
     }
 
     /// Marks the cached file `key` as newly used, if it exists.
+    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// (empty, or starts with a dot or a forward or back slash).
     ///
     /// Returns whether a file for `key` exists in the cache.
     pub fn touch(&self, key: Key) -> Result<bool> {
