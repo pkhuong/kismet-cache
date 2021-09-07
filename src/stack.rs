@@ -3,12 +3,14 @@
 //! between plain and sharded caches via late binding, and lets
 //! callers transparently handle misses by looking in a series of
 //! secondary cache directories.
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Result;
 use std::path::Path;
 use std::sync::Arc;
+use tempfile::NamedTempFile;
 
 use crate::Key;
 use crate::PlainCache;
@@ -26,6 +28,10 @@ trait FullCache:
     ///
     /// Implicitly "touches" the cached file if it exists.
     fn get(&self, key: Key) -> Result<Option<File>>;
+
+    /// Returns a temporary directory suitable for temporary files
+    /// that will be published as `key`.
+    fn temp_dir(&self, key: Key) -> Result<Cow<Path>>;
 
     /// Inserts or overwrites the file at `value` as `key` in the
     /// sharded cache directory.
@@ -53,6 +59,10 @@ impl FullCache for PlainCache {
         PlainCache::get(self, key.name)
     }
 
+    fn temp_dir(&self, _key: Key) -> Result<Cow<Path>> {
+        PlainCache::temp_dir(self)
+    }
+
     fn set(&self, key: Key, value: &Path) -> Result<()> {
         PlainCache::set(self, key.name, value)
     }
@@ -69,6 +79,10 @@ impl FullCache for PlainCache {
 impl FullCache for ShardedCache {
     fn get(&self, key: Key) -> Result<Option<File>> {
         ShardedCache::get(self, key)
+    }
+
+    fn temp_dir(&self, key: Key) -> Result<Cow<Path>> {
+        ShardedCache::temp_dir(self, Some(key))
     }
 
     fn set(&self, key: Key, value: &Path) -> Result<()> {
@@ -102,6 +116,28 @@ pub struct CacheBuilder {
 pub struct Cache {
     write_side: Option<Arc<dyn FullCache>>,
     read_side: ReadOnlyCache,
+}
+
+/// Where does a cache hit come from: the primary read-write cache, or
+/// one of the secondary read-only caches?
+pub enum CacheHit<'a> {
+    /// The file was found in the primary read-write cache; promoting
+    /// it is a no-op.
+    Primary(&'a mut File),
+    /// The file was found in one of the secondary read-only caches.
+    /// Promoting it to the primary cache will require a full copy.
+    Secondary(&'a mut File),
+}
+
+/// What to do with a cache hit in a `get_or_update` call?
+pub enum CacheHitAction {
+    /// Return the cache hit as is.
+    Accept,
+    /// Return the cache hit after promoting it to the current write
+    /// cache directory, if necessary.
+    Promote,
+    /// Replace with and return a new file.
+    Replace,
 }
 
 impl CacheBuilder {
@@ -214,6 +250,102 @@ impl Cache {
         )
     }
 
+    /// Attempts to find a cache entry for `key`.  If there is none,
+    /// populates the cache with a file filled by `populate`.  Returns
+    /// a file in all cases (unless the call fails with an error).
+    pub fn ensure<'a>(
+        &self,
+        key: impl Into<Key<'a>>,
+        populate: impl FnOnce(&mut File) -> Result<()>,
+    ) -> Result<File> {
+        fn judge(_: CacheHit) -> CacheHitAction {
+            CacheHitAction::Promote
+        }
+
+        self.get_or_update(key, judge, |dst, _| populate(dst))
+    }
+
+    /// Attempts to find a cache entry for `key`.  If there is none,
+    /// populates the write cache (if possible) with a file, once
+    /// filled by `populate`; otherwise obeys the value returned by
+    /// `judge` to determine what to do with the hit.
+    ///
+    /// When we need to populate a new file, `populate` is called with
+    /// a mutable reference to the destination file, and the old
+    /// cached file (in whatever state `judge` left it), if available.
+    pub fn get_or_update<'a>(
+        &self,
+        key: impl Into<Key<'a>>,
+        judge: impl FnOnce(CacheHit) -> CacheHitAction,
+        populate: impl FnOnce(&mut File, Option<File>) -> Result<()>,
+    ) -> Result<File> {
+        // Attempts to return the `FullCache` for this `Cache`.
+        fn get_write_cache(this: &Cache) -> Result<&dyn FullCache> {
+            match this.write_side.as_ref() {
+                Some(cache) => Ok(cache.as_ref()),
+                None => Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "no kismet write cache defined",
+                )),
+            }
+        }
+
+        // Promotes `file` to `cache`.
+        fn promote(cache: &dyn FullCache, key: Key, mut file: File) -> Result<File> {
+            use std::io::Seek;
+
+            let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
+            std::io::copy(&mut file, tmp.as_file_mut())?;
+
+            // Force the destination file's contents to disk before
+            // adding it to the read-write cache: the caller can't
+            // tell us whether they want a `fsync`, so let's be safe
+            // and assume they do.
+            tmp.as_file().sync_all()?;
+            cache.put(key, tmp.path())?;
+
+            // We got a read-only file.  Rewind it before returning.
+            file.seek(std::io::SeekFrom::Start(0))?;
+            Ok(file)
+        }
+
+        let cache = get_write_cache(self)?;
+        let key: Key = key.into();
+
+        // Overwritten with `Some(file)` when replacing `file`.
+        let mut old = None;
+        if let Some(mut file) = cache.get(key)? {
+            match judge(CacheHit::Primary(&mut file)) {
+                // Promote is a no-op if the file is already in the write cache.
+                CacheHitAction::Accept | CacheHitAction::Promote => return Ok(file),
+                CacheHitAction::Replace => old = Some(file),
+            }
+        } else if let Some(mut file) = self.read_side.get(key)? {
+            match judge(CacheHit::Secondary(&mut file)) {
+                CacheHitAction::Accept => return Ok(file),
+                CacheHitAction::Promote => return promote(get_write_cache(self)?, key, file),
+                CacheHitAction::Replace => old = Some(file),
+            }
+        }
+
+        let replace = old.is_some();
+        // We either have to replace or ensure there is a cache entry.
+        // Either way, start by populating a temporary file.
+        let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
+        populate(tmp.as_file_mut(), old)?;
+
+        // Grab a read-only return value before publishing the file.
+        let path = tmp.path();
+        let ret = File::open(path)?;
+        if replace {
+            cache.set(key, path)?;
+        } else {
+            cache.put(key, path)?;
+        }
+
+        Ok(ret)
+    }
+
     /// Inserts or overwrites the file at `value` as `key` in the
     /// write cache directory.  This will always fail with
     /// `Unsupported` if no write cache was defined.
@@ -280,6 +412,8 @@ mod test {
 
     use crate::Cache;
     use crate::CacheBuilder;
+    use crate::CacheHit;
+    use crate::CacheHitAction;
     use crate::Key;
     use crate::PlainCache;
     use crate::ShardedCache;
@@ -309,11 +443,385 @@ mod test {
         let cache: Cache = Default::default();
 
         assert!(matches!(cache.get(&TestKey::new("foo")), Ok(None)));
+        assert!(
+            matches!(cache.ensure(&TestKey::new("foo"), |_| unreachable!("should not be called when there is no write side")),
+                         Err(e) if e.kind() == ErrorKind::Unsupported)
+        );
         assert!(matches!(cache.set(&TestKey::new("foo"), "/tmp/foo"),
                          Err(e) if e.kind() == ErrorKind::Unsupported));
         assert!(matches!(cache.put(&TestKey::new("foo"), "/tmp/foo"),
                          Err(e) if e.kind() == ErrorKind::Unsupported));
         assert!(matches!(cache.touch(&TestKey::new("foo")), Ok(false)));
+    }
+
+    // Fail to find a file, ensure it, then see that we can get it.
+    #[test]
+    fn test_ensure() {
+        use std::io::{Read, Write};
+        use test_dir::{DirBuilder, TestDir};
+
+        let temp = TestDir::temp();
+        let cache = CacheBuilder::new().writer(temp.path("."), 1, 10).build();
+        let key = TestKey::new("foo");
+
+        // The file doesn't exist initially.
+        assert!(matches!(cache.get(&key), Ok(None)));
+
+        {
+            let mut populated = cache
+                .ensure(&key, |file| file.write_all(b"test"))
+                .expect("ensure must succeed");
+
+            let mut dst = Vec::new();
+            populated.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"test");
+        }
+
+        // And now get the file again.
+        {
+            let mut fetched = cache
+                .get(&key)
+                .expect("get must succeed")
+                .expect("file must be found");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"test");
+        }
+
+        // And make sure a later `ensure` call just grabs the file.
+        {
+            let mut populated = cache
+                .ensure(&key, |_| {
+                    unreachable!("should not be called for an extant file")
+                })
+                .expect("ensure must succeed");
+
+            let mut dst = Vec::new();
+            populated.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"test");
+        }
+    }
+
+    // Use a two-level cache, and make sure `ensure` promotes copies from
+    // the backup to the primary location.
+    #[test]
+    fn test_ensure_promote() {
+        use std::io::{Read, Write};
+        use tempfile::NamedTempFile;
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("cache", FileType::Dir)
+            .create("extra_plain", FileType::Dir);
+
+        // Populate the plain cache in `extra_plain` with one file.
+        {
+            let cache = PlainCache::new(temp.path("extra_plain"), 10);
+
+            let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
+                .expect("new temp file must succeed");
+            tmp.as_file()
+                .write_all(b"initial")
+                .expect("write must succeed");
+
+            cache.put("foo", tmp.path()).expect("put must succeed");
+        }
+
+        let cache = CacheBuilder::new()
+            .writer(temp.path("cache"), 1, 10)
+            .plain_reader(temp.path("extra_plain"))
+            .build();
+        let key = TestKey::new("foo");
+
+        // The file is found initially.
+        {
+            let mut fetched = cache
+                .get(&key)
+                .expect("get must succeed")
+                .expect("file must be found");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"initial");
+        }
+
+        {
+            let mut populated = cache
+                .ensure(&key, |_| {
+                    unreachable!("should not be called for an extant file")
+                })
+                .expect("ensure must succeed");
+
+            let mut dst = Vec::new();
+            populated.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"initial");
+        }
+
+        // And now get the file again, and make sure it doesn't come from the
+        // backup location.
+        {
+            let new_cache = CacheBuilder::new()
+                .writer(temp.path("cache"), 1, 10)
+                .build();
+            let mut fetched = new_cache
+                .get(&key)
+                .expect("get must succeed")
+                .expect("file must be found");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"initial");
+        }
+    }
+
+    // Use a two-level cache, get_or_update with an `Accept` judgement.
+    // We should leave everything where it is.
+    #[test]
+    fn test_get_or_update_accept() {
+        use std::io::{Read, Write};
+        use tempfile::NamedTempFile;
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("cache", FileType::Dir)
+            .create("extra_plain", FileType::Dir);
+
+        // Populate the plain cache in `extra_plain` with one file.
+        {
+            let cache = PlainCache::new(temp.path("extra_plain"), 10);
+
+            let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
+                .expect("new temp file must succeed");
+            tmp.as_file()
+                .write_all(b"initial")
+                .expect("write must succeed");
+
+            cache.put("foo", tmp.path()).expect("put must succeed");
+        }
+
+        let cache = CacheBuilder::new()
+            // Make it sharded, because why not?
+            .writer(temp.path("cache"), 2, 10)
+            .plain_reader(temp.path("extra_plain"))
+            .build();
+        let key = TestKey::new("foo");
+        let key2 = TestKey::new("bar");
+
+        // The file is found initially, in the backup cache.
+        {
+            let mut fetched = cache
+                .get_or_update(
+                    &key,
+                    |hit| {
+                        assert!(matches!(hit, CacheHit::Secondary(_)));
+                        CacheHitAction::Accept
+                    },
+                    |_, _| unreachable!("should not have to fill an extant file"),
+                )
+                .expect("get_or_update must succeed");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"initial");
+        }
+
+        // Let's try again with a file that does not exist yet.
+        {
+            let mut fetched = cache
+                .get_or_update(
+                    &key2,
+                    |_| unreachable!("should not be called"),
+                    |file, old| {
+                        assert!(old.is_none());
+                        file.write_all(b"updated")
+                    },
+                )
+                .expect("get_or_update must succeed");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"updated");
+        }
+
+        // The new file is now found.
+        {
+            let mut fetched = cache
+                .get_or_update(
+                    &key2,
+                    |hit| {
+                        assert!(matches!(hit, CacheHit::Primary(_)));
+                        CacheHitAction::Accept
+                    },
+                    |_, _| unreachable!("should not have to fill an extant file"),
+                )
+                .expect("get_or_update must succeed");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"updated");
+        }
+
+        // And now get the files again, and make sure they don't
+        // come from the backup location.
+        {
+            let new_cache = CacheBuilder::new()
+                .writer(temp.path("cache"), 2, 10)
+                .build();
+
+            // The new cache shouldn't have the old key.
+            assert!(matches!(new_cache.touch(&key), Ok(false)));
+
+            // But it should have `key2`.
+            let mut fetched = new_cache
+                .get(&key2)
+                .expect("get must succeed")
+                .expect("file must be found");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"updated");
+        }
+    }
+
+    // Use a two-level cache, get_or_update with a `Replace` judgement.
+    // We should always overwrite everything to the write cache.
+    #[test]
+    fn test_get_or_update_replace() {
+        use std::io::{Read, Write};
+        use tempfile::NamedTempFile;
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("cache", FileType::Dir)
+            .create("extra_plain", FileType::Dir);
+
+        // Populate the plain cache in `extra_plain` with one file.
+        {
+            let cache = PlainCache::new(temp.path("extra_plain"), 10);
+
+            let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
+                .expect("new temp file must succeed");
+            tmp.as_file()
+                .write_all(b"initial")
+                .expect("write must succeed");
+
+            cache.put("foo", tmp.path()).expect("put must succeed");
+        }
+
+        let cache = CacheBuilder::new()
+            // Make it sharded, because why not?
+            .writer(temp.path("cache"), 2, 10)
+            .plain_reader(temp.path("extra_plain"))
+            .build();
+        let key = TestKey::new("foo");
+
+        {
+            let mut fetched = cache
+                .get_or_update(
+                    &key,
+                    |hit| {
+                        assert!(matches!(hit, CacheHit::Secondary(_)));
+                        CacheHitAction::Replace
+                    },
+                    |file, old| {
+                        // Make sure the `old` file is the "initial" file.
+                        let mut prev = old.expect("must have old data");
+                        let mut dst = Vec::new();
+                        prev.read_to_end(&mut dst).expect("read must succeed");
+                        assert_eq!(&dst, b"initial");
+
+                        file.write_all(b"replace1")
+                    },
+                )
+                .expect("get_or_update must succeed");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"replace1");
+        }
+
+        // Re-read the file.
+        {
+            let mut fetched = cache
+                .get(&key)
+                .expect("get must succeed")
+                .expect("file should be found");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"replace1");
+        }
+
+        // Update it again.
+        {
+            let mut fetched = cache
+                .get_or_update(
+                    &key,
+                    |hit| {
+                        assert!(matches!(hit, CacheHit::Primary(_)));
+                        CacheHitAction::Replace
+                    },
+                    |file, old| {
+                        // Make sure the `old` file is the "initial" file.
+                        let mut prev = old.expect("must have old data");
+                        let mut dst = Vec::new();
+                        prev.read_to_end(&mut dst).expect("read must succeed");
+                        assert_eq!(&dst, b"replace1");
+
+                        file.write_all(b"replace2")
+                    },
+                )
+                .expect("get_or_update must succeed");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"replace2");
+        }
+
+        // The new file is now found.
+        {
+            let mut fetched = cache
+                .get_or_update(
+                    &key,
+                    |hit| {
+                        assert!(matches!(hit, CacheHit::Primary(_)));
+                        CacheHitAction::Replace
+                    },
+                    |file, old| {
+                        // Make sure the `old` file is the "replace2" file.
+                        let mut prev = old.expect("must have old data");
+                        let mut dst = Vec::new();
+                        prev.read_to_end(&mut dst).expect("read must succeed");
+                        assert_eq!(&dst, b"replace2");
+
+                        file.write_all(b"replace3")
+                    },
+                )
+                .expect("get_or_update must succeed");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"replace3");
+        }
+
+        // And now get the same file again, and make sure it doesn't
+        // come from the backup location.
+        {
+            let new_cache = CacheBuilder::new()
+                .writer(temp.path("cache"), 2, 10)
+                .build();
+
+            // But it should have `key2`.
+            let mut fetched = new_cache
+                .get(&key)
+                .expect("get must succeed")
+                .expect("file must be found");
+
+            let mut dst = Vec::new();
+            fetched.read_to_end(&mut dst).expect("read must succeed");
+            assert_eq!(&dst, b"replace3");
+        }
     }
 
     // Smoke test a wrapped plain cache.

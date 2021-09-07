@@ -8,9 +8,9 @@ license = "MIT"
 [dependencies]
 filetime = "0.2"
 rand = "0.8"
+tempfile = "3"
 
 [dev-dependencies]
 proptest = "1"
 proptest-derive = "0.3"
-tempfile = "3"
 test_dir = "0.1"
