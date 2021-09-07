@@ -1,16 +1,14 @@
 mod cache_dir;
-mod plain;
+pub mod plain;
 pub mod raw_cache;
 mod readonly;
 pub mod second_chance;
-mod sharded;
+pub mod sharded;
 mod stack;
 mod trigger;
 
-pub use plain::PlainCache;
 pub use readonly::ReadOnlyCache;
 pub use readonly::ReadOnlyCacheBuilder;
-pub use sharded::ShardedCache;
 pub use stack::Cache;
 pub use stack::CacheBuilder;
 pub use stack::CacheHit;

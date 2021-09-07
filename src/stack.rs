@@ -12,11 +12,11 @@ use std::path::Path;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 
+use crate::plain::Cache as PlainCache;
+use crate::sharded::Cache as ShardedCache;
 use crate::Key;
-use crate::PlainCache;
 use crate::ReadOnlyCache;
 use crate::ReadOnlyCacheBuilder;
-use crate::ShardedCache;
 
 /// The `FullCache` trait exposes both read and write operations as
 /// implemented by sharded and plain caches.
@@ -428,13 +428,13 @@ impl Cache {
 mod test {
     use std::io::ErrorKind;
 
+    use crate::plain::Cache as PlainCache;
+    use crate::sharded::Cache as ShardedCache;
     use crate::Cache;
     use crate::CacheBuilder;
     use crate::CacheHit;
     use crate::CacheHitAction;
     use crate::Key;
-    use crate::PlainCache;
-    use crate::ShardedCache;
 
     struct TestKey {
         key: String,

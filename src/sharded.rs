@@ -1,10 +1,17 @@
-//! A `ShardedCache` uses the same basic file-based second chance
-//! strategy as a `PlainCache`.  However, while the simple plain cache
-//! is well suited to small caches (down to 2-3 files, and up maybe
-//! one hundred), this sharded version can scale nearly arbitrarily
-//! high: each shard should have fewer than one hundred or so files,
-//! but there may be arbitrarily many shards (up to filesystem limits,
-//! since each shard is a subdirectory).
+//! A `sharded::Cache` uses the same basic file-based second chance
+//! strategy as a `plain::Cache`.  However, while the simple plain
+//! cache is well suited to small caches (down to 2-3 files, and up
+//! maybe one hundred), this sharded version can scale nearly
+//! arbitrarily high: each shard should have fewer than one hundred or
+//! so files, but there may be arbitrarily many shards (up to
+//! filesystem limits, since each shard is a subdirectory).
+//!
+//! This module is useful for lower level usage; in most cases, the
+//! `Cache` is more convenient and just as efficient.
+//!
+//! The cache's contents will grow past its stated capacity, but
+//! should rarely reach more than twice that capacity, especially
+//! when the shard capacity is less than 128 files.
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::Result;
@@ -32,7 +39,7 @@ const SECONDARY_RANDOM_MULTIPLIER: u64 = 0xa55e1e02718a6a47;
 /// subdirectories.  Each subdirectory is managed as an
 /// independent second chance cache directory.
 #[derive(Clone, Debug)]
-pub struct ShardedCache {
+pub struct Cache {
     // The current load (number of files) estimate for each shard.
     load_estimates: Arc<[AtomicU8]>,
     // The parent directory for each shard (cache subdirectory).
@@ -111,14 +118,10 @@ impl CacheDir for Shard {
     }
 }
 
-impl ShardedCache {
+impl Cache {
     /// Returns a new cache for approximately `total_capacity` files,
     /// stores in `num_shards` subdirectories of `base_dir`.
-    pub fn new(
-        base_dir: PathBuf,
-        mut num_shards: usize,
-        mut total_capacity: usize,
-    ) -> ShardedCache {
+    pub fn new(base_dir: PathBuf, mut num_shards: usize, mut total_capacity: usize) -> Cache {
         // We assume at least two shards.
         if num_shards < 2 {
             num_shards = 2;
@@ -135,7 +138,7 @@ impl ShardedCache {
         let trigger =
             PeriodicTrigger::new(shard_capacity.min(total_capacity / MAINTENANCE_SCALE) as u64);
 
-        ShardedCache {
+        Cache {
             load_estimates: load_estimates.into_boxed_slice().into(),
             base_dir,
             trigger,
@@ -383,7 +386,7 @@ fn smoke_test() {
     const PAYLOAD_MULTIPLIER: usize = 113;
 
     let temp = TestDir::temp();
-    let cache = ShardedCache::new(temp.path("."), 3, 9);
+    let cache = Cache::new(temp.path("."), 3, 9);
 
     for i in 0..200 {
         let name = format!("{}", i);
@@ -436,7 +439,7 @@ fn test_set() {
     use test_dir::{DirBuilder, TestDir};
 
     let temp = TestDir::temp();
-    let cache = ShardedCache::new(temp.path("."), 0, 0);
+    let cache = Cache::new(temp.path("."), 0, 0);
 
     {
         let tmp = NamedTempFile::new_in(cache.temp_dir(None).expect("temp_dir must succeed"))
@@ -489,7 +492,7 @@ fn test_put() {
     use test_dir::{DirBuilder, TestDir};
 
     let temp = TestDir::temp();
-    let cache = ShardedCache::new(temp.path("."), 0, 0);
+    let cache = Cache::new(temp.path("."), 0, 0);
 
     {
         let tmp = NamedTempFile::new_in(cache.temp_dir(None).expect("temp_dir must succeed"))
@@ -535,7 +538,7 @@ fn test_touch() {
     const PAYLOAD_MULTIPLIER: usize = 113;
 
     let temp = TestDir::temp();
-    let cache = ShardedCache::new(temp.path("."), 2, 600);
+    let cache = Cache::new(temp.path("."), 2, 600);
 
     for i in 0..2000 {
         // After the first write, we should find our file.

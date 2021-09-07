@@ -8,9 +8,9 @@ use std::io::Result;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::plain::Cache as PlainCache;
+use crate::sharded::Cache as ShardedCache;
 use crate::Key;
-use crate::PlainCache;
-use crate::ShardedCache;
 
 /// The `ReadSide` trait offers `get` and `touch`, as implemented by
 /// both plain and sharded caches.
@@ -192,11 +192,11 @@ impl ReadOnlyCache {
 
 #[cfg(test)]
 mod test {
+    use crate::plain::Cache as PlainCache;
+    use crate::sharded::Cache as ShardedCache;
     use crate::Key;
-    use crate::PlainCache;
     use crate::ReadOnlyCache;
     use crate::ReadOnlyCacheBuilder;
-    use crate::ShardedCache;
 
     struct TestKey {
         key: String,

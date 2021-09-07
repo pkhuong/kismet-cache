@@ -1,3 +1,14 @@
+//! A `plain::Cache` stores all cached file in a single directory, and
+//! periodically scans for evictions with a second chance strategy.
+//! This implementation does not scale up to more than a few hundred
+//! files per cache directory (a `sharded::Cache` can go higher),
+//! but interoperates seamlessly with other file-based programs.
+//!
+//! This module is useful for lower level usage; in most cases, the
+//! `Cache` is more convenient and just as efficient.
+//!
+//! The cache's contents will grow past its stated capacity, but
+//! should rarely reach more than twice that capacity.
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::Result;
@@ -19,7 +30,7 @@ const MAINTENANCE_SCALE: usize = 3;
 /// every `k / 3` (`k / 6` in the long run, given the way
 /// `PeriodicTrigger` is implemented) insertions.
 #[derive(Clone, Debug)]
-pub struct PlainCache {
+pub struct Cache {
     // The cached files are siblings of this directory for temporary
     // files.
     temp_dir: PathBuf,
@@ -34,7 +45,7 @@ pub struct PlainCache {
     capacity: usize,
 }
 
-impl CacheDir for PlainCache {
+impl CacheDir for Cache {
     #[inline]
     fn temp_dir(&self) -> Cow<Path> {
         Cow::from(&self.temp_dir)
@@ -56,14 +67,14 @@ impl CacheDir for PlainCache {
     }
 }
 
-impl PlainCache {
+impl Cache {
     /// Returns a new cache for approximately `capacity` files in
     /// `base_dir`.
-    pub fn new(base_dir: PathBuf, capacity: usize) -> PlainCache {
+    pub fn new(base_dir: PathBuf, capacity: usize) -> Cache {
         let mut temp_dir = base_dir;
 
         temp_dir.push(TEMP_SUBDIR);
-        PlainCache {
+        Cache {
             temp_dir,
             trigger: PeriodicTrigger::new((capacity / MAINTENANCE_SCALE) as u64),
             capacity,
@@ -142,7 +153,7 @@ fn smoke_test() {
 
     // Make sure the garbage file is old enough to be deleted.
     std::thread::sleep(std::time::Duration::from_secs_f64(2.5));
-    let cache = PlainCache::new(temp.path("."), 10);
+    let cache = Cache::new(temp.path("."), 10);
 
     for i in 0..20 {
         let name = format!("{}", i);
@@ -188,7 +199,7 @@ fn test_set() {
     use test_dir::{DirBuilder, TestDir};
 
     let temp = TestDir::temp();
-    let cache = PlainCache::new(temp.path("."), 1);
+    let cache = Cache::new(temp.path("."), 1);
 
     {
         let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
@@ -241,7 +252,7 @@ fn test_put() {
     use test_dir::{DirBuilder, TestDir};
 
     let temp = TestDir::temp();
-    let cache = PlainCache::new(temp.path("."), 1);
+    let cache = Cache::new(temp.path("."), 1);
 
     {
         let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
@@ -293,7 +304,7 @@ fn test_touch() {
     use test_dir::{DirBuilder, TestDir};
 
     let temp = TestDir::temp();
-    let cache = PlainCache::new(temp.path("."), 5);
+    let cache = Cache::new(temp.path("."), 5);
 
     for i in 0..15 {
         let name = format!("{}", i);
@@ -331,7 +342,7 @@ fn test_recent_temp_file() {
     // The garbage file must exist.
     assert!(std::fs::metadata(temp.path(&format!("{}/garbage", TEMP_SUBDIR))).is_ok());
 
-    let cache = PlainCache::new(temp.path("."), 1);
+    let cache = Cache::new(temp.path("."), 1);
 
     for i in 0..2 {
         let tmp = NamedTempFile::new_in(cache.temp_dir().expect("temp_dir must succeed"))
