@@ -4,12 +4,15 @@ pub mod raw_cache;
 mod readonly;
 pub mod second_chance;
 mod sharded;
+mod stack;
 mod trigger;
 
 pub use plain::PlainCache;
 pub use readonly::ReadOnlyCache;
 pub use readonly::ReadOnlyCacheBuilder;
 pub use sharded::ShardedCache;
+pub use stack::Cache;
+pub use stack::CacheBuilder;
 
 /// Sharded cache keys consist of a filename and two hash values.  The
 /// two hashes should be computed by distinct functions of the key's
