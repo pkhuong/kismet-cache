@@ -1,8 +1,9 @@
-//! The Second Chance or Clock page replacement policy is a simple
-//! approximation of the Least Recently Used policy.  Kismet uses the
-//! second chance policy because it can be easily implemented on top
-//! of the usual file modification and access times that we can trust
-//! operating systems to update for us.
+//! The [Second Chance or Clock](https://en.wikipedia.org/wiki/Page_replacement_algorithm#Second-chance)
+//! page replacement policy is a simple approximation of the Least
+//! Recently Used policy.  Kismet uses the second chance policy
+//! because it can be easily implemented on top of the usual file
+//! modification and access times that we can trust operating systems
+//! to update for us.
 //!
 //! This second chance implementation is optimised for *batch*
 //! maintenance: the caller is expected to perform a number of

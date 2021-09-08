@@ -1,12 +1,12 @@
 //! The raw cache module manages directories of read-only files
 //! subject to a (batched) Second Chance eviction policy.  Calling
-//! `prune` deletes files to make sure a cache directory does not
+//! [`prune`] deletes files to make sure a cache directory does not
 //! exceed its capacity, in file count.  The deletions will obey a
 //! Second Chance policy as long as insertions and updates go through
-//! `insert_or_update` or `insert_or_touch`, in order to update the
+//! [`insert_or_update`] or [`insert_or_touch`], in order to update the
 //! cached files' modification times correctly.  Opening the cached
 //! file will automatically update its metadata to take that access
-//! into account, but a path can also be `touch`ed explicitly.
+//! into account, but a path can also be [`touch`]ed explicitly.
 //!
 //! This module implements mechanisms, but does not hardcode any
 //! policy... except the use of a second chance strategy.

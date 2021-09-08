@@ -1,13 +1,18 @@
-//! A `sharded::Cache` uses the same basic file-based second chance
-//! strategy as a `plain::Cache`.  However, while the simple plain
-//! cache is well suited to small caches (down to 2-3 files, and up
-//! maybe one hundred), this sharded version can scale nearly
-//! arbitrarily high: each shard should have fewer than one hundred or
-//! so files, but there may be arbitrarily many shards (up to
-//! filesystem limits, since each shard is a subdirectory).
+//! A [`crate::sharded::Cache`] uses the same basic file-based second
+//! chance strategy as a [`crate::plain::Cache`].  However, while the
+//! simple plain cache is well suited to small caches (down to 2-3
+//! files, and up maybe one hundred), this sharded version can scale
+//! nearly arbitrarily high: each shard should have fewer than one
+//! hundred or so files, but there may be arbitrarily many shards (up
+//! to filesystem limits, since each shard is a subdirectory).
+//!
+//! A sharded cache directory consists of shard subdirectories (with
+//! name equal to the shard index printed as `%04x`), each of which
+//! contains the cached files for that shard, under their `key` name,
+//! and an optional `.kismet_temp` subdirectory for temporary files.
 //!
 //! This module is useful for lower level usage; in most cases, the
-//! `Cache` is more convenient and just as efficient.
+//! [`crate::Cache`] is more convenient and just as efficient.
 //!
 //! The cache's contents will grow past its stated capacity, but
 //! should rarely reach more than twice that capacity, especially

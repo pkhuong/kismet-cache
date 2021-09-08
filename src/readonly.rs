@@ -4,6 +4,8 @@
 //! and easy-to-use interface that erases the difference between plain
 //! and sharded caches.
 use std::fs::File;
+#[allow(unused_imports)] // We refer to this enum in comments.
+use std::io::ErrorKind;
 use std::io::Result;
 use std::path::Path;
 use std::sync::Arc;
@@ -49,7 +51,7 @@ impl ReadSide for ShardedCache {
     }
 }
 
-/// Construct a `ReadOnlyCache` with this builder.  The resulting
+/// Construct a [`ReadOnlyCache`] with this builder.  The resulting
 /// cache will access each constituent cache directory in the order
 /// they were added.
 ///
@@ -59,13 +61,20 @@ pub struct ReadOnlyCacheBuilder {
     stack: Vec<Box<dyn ReadSide>>,
 }
 
-/// A `ReadOnlyCache` wraps an arbitrary number of caches, and
-/// attempts to satisfy `get` and `touch` requests by hitting each
-/// constituent cache in order.  This interface hides the difference
-/// between plain and sharded cache directories, and should be the
-/// first resort for read-only uses.
+/// A [`ReadOnlyCache`] wraps an arbitrary number of
+/// [`crate::plain::Cache`] and [`crate::sharded::Cache`], and attempts
+/// to satisfy [`ReadOnlyCache::get`] and [`ReadOnlyCache::touch`]
+/// requests by hitting each constituent cache in order.  This
+/// interface hides the difference between plain and sharded cache
+/// directories, and should be the first resort for read-only uses.
 ///
 /// The default cache wraps an empty set of constituent caches.
+///
+/// [`ReadOnlyCache`] objects are stateless and cheap to clone; don't
+/// put an [`Arc`] on them.  Avoid creating multiple
+/// [`ReadOnlyCache`]s for the same stack of directories: there is no
+/// internal state to maintain, so multiple instances simply waste
+/// memory without any benefit.
 #[derive(Clone, Debug)]
 pub struct ReadOnlyCache {
     stack: Arc<[Box<dyn ReadSide>]>,
@@ -114,7 +123,7 @@ impl ReadOnlyCacheBuilder {
         self
     }
 
-    /// Returns a fresh `ReadOnlyCache` for the builder's search list
+    /// Returns a fresh [`ReadOnlyCache`] for the builder's search list
     /// of constituent cache directories.
     pub fn build(self) -> ReadOnlyCache {
         ReadOnlyCache::new(self.stack)
@@ -135,15 +144,19 @@ impl ReadOnlyCache {
     }
 
     /// Attempts to open a read-only file for `key`.  The
-    /// `ReadOnlyCache` will query each constituent cache in order of
-    /// registration, and return a read-only file for the first hit.
+    /// [`ReadOnlyCache`] will query each constituent cache in order
+    /// of registration, and return a read-only file for the first
+    /// hit.
     ///
-    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
-    /// (empty, or starts with a dot or a forward or back slash).
+    /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is
+    /// invalid (empty, or starts with a dot or a forward or back slash).
     ///
-    /// Returns `None` if no file for `key` can be found in any of the
-    /// constituent caches, and bubbles up the first I/O error
+    /// Returns [`None`] if no file for `key` can be found in any of
+    /// the constituent caches, and bubbles up the first I/O error
     /// encountered, if any.
+    ///
+    /// In the worst case, each call to `get` attempts to open two
+    /// files for each cache directory in the `ReadOnlyCache` stack.
     pub fn get<'a>(&self, key: impl Into<Key<'a>>) -> Result<Option<File>> {
         fn doit(stack: &[Box<dyn ReadSide>], key: Key) -> Result<Option<File>> {
             for cache in stack.iter() {
@@ -163,14 +176,18 @@ impl ReadOnlyCache {
     }
 
     /// Marks a cache entry for `key` as accessed (read).  The
-    /// `ReadOnlyCache` will touch the same file that would be returned
-    /// by `get`.
+    /// [`ReadOnlyCache`] will touch the same file that would be
+    /// returned by `get`.
     ///
-    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
-    /// (empty, or starts with a dot or a forward or back slash).
+    /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is
+    /// invalid (empty, or starts with a dot or a forward or back slash).
     ///
     /// Returns whether a file for `key` could be found, and bubbles
     /// up the first I/O error encountered, if any.
+    ///
+    /// In the worst case, each call to `touch` attempts to update the
+    /// access time on two files for each cache directory in the
+    /// `ReadOnlyCache` stack.
     pub fn touch<'a>(&self, key: impl Into<Key<'a>>) -> Result<bool> {
         fn doit(stack: &[Box<dyn ReadSide>], key: Key) -> Result<bool> {
             for cache in stack.iter() {

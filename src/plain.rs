@@ -1,11 +1,14 @@
-//! A `plain::Cache` stores all cached file in a single directory, and
-//! periodically scans for evictions with a second chance strategy.
-//! This implementation does not scale up to more than a few hundred
-//! files per cache directory (a `sharded::Cache` can go higher),
-//! but interoperates seamlessly with other file-based programs.
+//! A [`crate::plain::Cache`] stores all cached file in a single
+//! directory (there may also be a `.kismet_temp` subdirectory for
+//! temporary files), and periodically scans for evictions with a
+//! second chance strategy.  This implementation does not scale up to
+//! more than a few hundred files per cache directory (a
+//! [`crate::sharded::Cache`] can go higher), but interoperates
+//! seamlessly with other file-based programs that store cache files
+//! in flat directories.
 //!
 //! This module is useful for lower level usage; in most cases, the
-//! `Cache` is more convenient and just as efficient.
+//! [`crate::Cache`] is more convenient and just as efficient.
 //!
 //! The cache's contents will grow past its stated capacity, but
 //! should rarely reach more than twice that capacity.

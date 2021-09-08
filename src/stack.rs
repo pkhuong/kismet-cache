@@ -1,8 +1,9 @@
-//! We expect most callers to interact with Kismet via the `Cache`
-//! struct defined here.  A `Cache` hides the difference in behaviour
-//! between plain and sharded caches via late binding, and lets
-//! callers transparently handle misses by looking in a series of
-//! secondary cache directories.
+//! We expect most callers to interact with Kismet via the [`Cache`]
+//! struct defined here.  A [`Cache`] hides the difference in
+//! behaviour between [`crate::plain::Cache`] and
+//! [`crate::sharded::Cache`] via late binding, and lets callers
+//! transparently handle misses by looking in a series of secondary
+//! cache directories.
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::Error;
@@ -98,20 +99,29 @@ impl FullCache for ShardedCache {
     }
 }
 
-/// Construct a `Cache` with this builder.  The resulting cache will
+/// Construct a [`Cache`] with this builder.  The resulting cache will
 /// always first access its write-side cache (if defined), and, on
-/// misses, will attempt to service `get` and `touch` calls by
-/// iterating over the read-only caches.
+/// misses, will attempt to service [`Cache::get`] and
+/// [`Cache::touch`] calls by iterating over the read-only caches.
 #[derive(Debug, Default)]
 pub struct CacheBuilder {
     write_side: Option<Arc<dyn FullCache>>,
     read_side: ReadOnlyCacheBuilder,
 }
 
-/// A `Cache` wraps either up to one plain or sharded read-write cache
-/// in a convenient interface, and may optionally fulfill read
+/// A [`Cache`] wraps either up to one plain or sharded read-write
+/// cache in a convenient interface, and may optionally fulfill read
 /// operations by deferring to a list of read-only cache when the
 /// read-write cache misses.
+///
+/// The default cache has no write-side and an empty stack of backup
+/// read-only caches.
+///
+/// [`Cache`] objects are cheap to clone and lock-free; don't put an
+/// [`Arc`] on them.  Avoid opening multiple caches for the same set
+/// of directories: using the same [`Cache`] object improves the
+/// accuracy of the write cache's lock-free in-memory statistics, when
+/// it's a sharded cache.
 #[derive(Clone, Debug, Default)]
 pub struct Cache {
     write_side: Option<Arc<dyn FullCache>>,
@@ -129,7 +139,7 @@ pub enum CacheHit<'a> {
     Secondary(&'a mut File),
 }
 
-/// What to do with a cache hit in a `get_or_update` call?
+/// What to do with a cache hit in a [`Cache::get_or_update`] call?
 pub enum CacheHitAction {
     /// Return the cache hit as is.
     Accept,
@@ -209,7 +219,7 @@ impl CacheBuilder {
         self
     }
 
-    /// Returns a fresh `Cache` for the builder's write cache and
+    /// Returns a fresh [`Cache`] for the builder's write cache and
     /// additional search list of read-only cache directories.
     pub fn build(self) -> Cache {
         Cache {
@@ -225,12 +235,16 @@ impl Cache {
     /// additional read-only cache, in definition order, and return a
     /// read-only file for the first hit.
     ///
-    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is invalid
     /// (empty, or starts with a dot or a forward or back slash).
     ///
-    /// Returns `None` if no file for `key` can be found in any of the
+    /// Returns [`None`] if no file for `key` can be found in any of the
     /// constituent caches, and bubbles up the first I/O error
     /// encountered, if any.
+    ///
+    /// In the worst case, each call to `get` attempts to open two
+    /// files for the [`Cache`]'s read-write directory and for each
+    /// read-only backup directory.
     pub fn get<'a>(&self, key: impl Into<Key<'a>>) -> Result<Option<File>> {
         fn doit(
             write_side: Option<&dyn FullCache>,
@@ -257,8 +271,10 @@ impl Cache {
     /// populates the cache with a file filled by `populate`.  Returns
     /// a file in all cases (unless the call fails with an error).
     ///
-    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
-    /// (empty, or starts with a dot or a forward or back slash).
+    /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is
+    /// invalid (empty, or starts with a dot or a forward or back slash).
+    ///
+    /// See [`Cache::get_or_update`] for more control over the operation.
     pub fn ensure<'a>(
         &self,
         key: impl Into<Key<'a>>,
@@ -276,12 +292,24 @@ impl Cache {
     /// filled by `populate`; otherwise obeys the value returned by
     /// `judge` to determine what to do with the hit.
     ///
-    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
-    /// (empty, or starts with a dot or a forward or back slash).
+    /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is
+    /// invalid (empty, or starts with a dot or a forward or back slash).
     ///
     /// When we need to populate a new file, `populate` is called with
     /// a mutable reference to the destination file, and the old
     /// cached file (in whatever state `judge` left it), if available.
+    /// cached file, if available.
+    ///
+    /// See [`Cache::ensure`] for a simpler interface.
+    ///
+    /// In the worst case, each call to `get_or_update` attempts to
+    /// open two files for the [`Cache`]'s read-write directory and
+    /// for each read-only backup directory, and fails to find
+    /// anything.  `get_or_update` then publishes a new cached file
+    /// (in a constant number of file operations), but not before
+    /// triggering a second chance maintenance (time linearithmic in
+    /// the number of files in the directory chosen for maintenance,
+    /// but amortised to logarithmic).
     pub fn get_or_update<'a>(
         &self,
         key: impl Into<Key<'a>>,
@@ -357,13 +385,18 @@ impl Cache {
 
     /// Inserts or overwrites the file at `value` as `key` in the
     /// write cache directory.  This will always fail with
-    /// `Unsupported` if no write cache was defined.
+    /// [`ErrorKind::Unsupported`] if no write cache was defined.
     ///
-    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is invalid
     /// (empty, or starts with a dot or a forward or back slash).
     ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
+    ///
+    /// Executes in a bounded number of file operations, except for
+    /// the lock-free maintenance, which needs time linearithmic in
+    /// the number of files in the directory chosen for maintenance,
+    /// amortised to logarithmic.
     pub fn set<'a>(&self, key: impl Into<Key<'a>>, value: impl AsRef<Path>) -> Result<()> {
         match self.write_side.as_ref() {
             Some(write) => write.set(key.into(), value.as_ref()),
@@ -376,13 +409,19 @@ impl Cache {
 
     /// Inserts the file at `value` as `key` in the cache directory if
     /// there is no such cached entry already, or touches the cached
-    /// file if it already exists.
+    /// file if it already exists.  This will always fail with
+    /// [`ErrorKind::Unsupported`] if no write cache was defined.
     ///
-    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is invalid
     /// (empty, or starts with a dot or a forward or back slash).
     ///
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
+    ///
+    /// Executes in a bounded number of file operations, except for
+    /// the lock-free maintenance, which needs time linearithmic in
+    /// the number of files in the directory chosen for maintenance,
+    /// amortised to logarithmic.
     pub fn put<'a>(&self, key: impl Into<Key<'a>>, value: impl AsRef<Path>) -> Result<()> {
         match self.write_side.as_ref() {
             Some(write) => write.put(key.into(), value.as_ref()),
@@ -393,14 +432,18 @@ impl Cache {
         }
     }
 
-    /// Marks a cache entry for `key` as accessed (read).  The `Cache`
+    /// Marks a cache entry for `key` as accessed (read).  The [`Cache`]
     /// will touch the same file that would be returned by `get`.
     ///
-    /// Fails with `ErrorKind::InvalidInput` if `key.name` is invalid
+    /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is invalid
     /// (empty, or starts with a dot or a forward or back slash).
     ///
     /// Returns whether a file for `key` could be found, and bubbles
     /// up the first I/O error encountered, if any.
+    ///
+    /// In the worst case, each call to `touch` attempts to update the
+    /// access time on two files for each cache directory in the
+    /// `ReadOnlyCache` stack.
     pub fn touch<'a>(&self, key: impl Into<Key<'a>>) -> Result<bool> {
         fn doit(
             write_side: Option<&dyn FullCache>,
