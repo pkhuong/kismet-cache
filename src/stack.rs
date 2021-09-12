@@ -488,6 +488,8 @@ impl Cache {
     /// Inserts or overwrites the file at `value` as `key` in the
     /// write cache directory.  This will always fail with
     /// [`ErrorKind::Unsupported`] if no write cache was defined.
+    /// The path at `value` must be in the same filesystem as the
+    /// write cache directory: we rely on atomic file renames.
     ///
     /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is invalid
     /// (empty, or starts with a dot or a forward or back slash).
@@ -515,6 +517,20 @@ impl Cache {
         doit(self, key.into(), value.as_ref())
     }
 
+    /// Invokes [`Cache::set`] on a [`tempfile::NamedTempFile`].
+    ///
+    /// See [`Cache::set`] for more details.  The only difference is
+    /// that `set_temp_file` does not panic when `auto_sync` is enabled
+    /// and we fail to [`File::sync_all`] the [`NamedTempFile`] value.
+    pub fn set_temp_file<'a>(&self, key: impl Into<Key<'a>>, value: NamedTempFile) -> Result<()> {
+        fn doit(this: &Cache, key: Key, value: NamedTempFile) -> Result<()> {
+            this.maybe_sync(value.as_file())?;
+            this.set_impl(key, value.path())
+        }
+
+        doit(self, key.into(), value)
+    }
+
     fn put_impl(&self, key: Key, value: &Path) -> Result<()> {
         match self.write_side.as_ref() {
             Some(write) => write.put(key, value),
@@ -529,6 +545,8 @@ impl Cache {
     /// there is no such cached entry already, or touches the cached
     /// file if it already exists.  This will always fail with
     /// [`ErrorKind::Unsupported`] if no write cache was defined.
+    /// The path at `value` must be in the same filesystem as the
+    /// write cache directory: we rely on atomic file hard linkage.
     ///
     /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is invalid
     /// (empty, or starts with a dot or a forward or back slash).
@@ -554,6 +572,20 @@ impl Cache {
         }
 
         doit(self, key.into(), value.as_ref())
+    }
+
+    /// Invokes [`Cache::put`] on a [`tempfile::NamedTempFile`].
+    ///
+    /// See [`Cache::put`] for more details.  The only difference is
+    /// that `put_temp_file` does not panic when `auto_sync` is enabled
+    /// and we fail to [`File::sync_all`] the [`NamedTempFile`] value.
+    pub fn put_temp_file<'a>(&self, key: impl Into<Key<'a>>, value: NamedTempFile) -> Result<()> {
+        fn doit(this: &Cache, key: Key, value: NamedTempFile) -> Result<()> {
+            this.maybe_sync(value.as_file())?;
+            this.put_impl(key, value.path())
+        }
+
+        doit(self, key.into(), value)
     }
 
     /// Marks a cache entry for `key` as accessed (read).  The [`Cache`]
@@ -1111,8 +1143,9 @@ mod test {
             tmp.as_file()
                 .write_all(b"write2")
                 .expect("write must succeed");
+            // Exercise put_temp_file as well.
             cache
-                .put(&TestKey::new("b"), tmp.path())
+                .put_temp_file(&TestKey::new("b"), tmp)
                 .expect("put must succeed");
         }
 
@@ -1265,8 +1298,9 @@ mod test {
             tmp.as_file()
                 .write_all(b"write2")
                 .expect("write must succeed");
+            // Exercise set_temp_file.
             cache
-                .set(&TestKey::new("b"), tmp.path())
+                .set_temp_file(&TestKey::new("b"), tmp)
                 .expect("set must succeed");
         }
 
