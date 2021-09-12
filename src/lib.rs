@@ -1,7 +1,7 @@
 //! Kismet implements multiprocess lock-free[^lock-free-fs]
-//! application-crash-safe (roughly) bounded persistent caches stored
+//! crash-safe and (roughly) bounded persistent caches stored
 //! in filesystem directories, with a
-//! [Second Chance (Clock)](https://en.wikipedia.org/wiki/Page_replacement_algorithm#Second-chance)
+//! [Second Chance](https://en.wikipedia.org/wiki/Page_replacement_algorithm#Second-chance)
 //! eviction strategy.  The maintenance logic is batched and invoked
 //! at periodic jittered intervals to make sure accesses amortise to a
 //! constant number of filesystem system calls and logarithmic (in the
@@ -36,26 +36,27 @@
 //! directory, one byte of lock-free metadata per shard, and no other
 //! non-heap resource (i.e., Kismet caches do not hold on to file
 //! objects).  This holds for individual cache directories; when
-//! stacking multiple caches in a [`Cache`], the read-write cache and
-//! all constituent read-only caches will each have their own
-//! `PathBuf` and per-shard metadata.
+//! stacking multiple caches in a [`Cache`] or [`ReadOnlyCache`], the
+//! read-write cache and all constituent read-only caches will each
+//! have their own `PathBuf` and per-shard metadata.
 //!
 //! When a Kismet cache triggers second chance evictions, it will
 //! allocate temporary data.  That data's size is proportional to the
 //! number of files in the cache shard subdirectory undergoing
 //! eviction (or the whole directory for a plain unsharded cache), and
-//! includes a copy of the name (without the path prefix) for each
+//! includes a copy of the basename (without the path prefix) for each
 //! cached file in the subdirectory (or plain cache directory).  This
 //! eviction process is linearithmic-time in the number of files in
 //! the cache subdirectory (directory), and is invoked periodically,
-//! so as to amortise the maintenance time overhead to logarithmic
-//! per write to a cache subdirectory.
+//! so as to amortise the maintenance overhead to logarithmic (in the
+//! total number of files in the subdirectory) time per write to a
+//! cache subdirectory, and constant file operations per write.
 //!
 //! Kismet does not pre-allocate any long-lived file object, so it may
-//! need to temporarily open file objects.  However, each call into
-//! Kismet will always bound the number of concurrently allocated file
-//! objects; the current logic never allocates more than two
-//! concurrent file objects.
+//! need to temporarily open file objects.  Each call nevertheless
+//! bounds the number of concurrently allocated file objects; the
+//! current logic never allocates more than two concurrent file
+//! objects.
 //!
 //! The load (number of files) in each cache may exceed the cache's
 //! capacity because there is no centralised accounting, except for
@@ -73,6 +74,8 @@
 //! multiple places, as long as the files are not modified, or their
 //! `mtime` otherwise updated, through these non-Kismet links.
 //!
+//! # Plain and sharded caches
+//!
 //! Kismet cache directories are plain (unsharded) or sharded.
 //!
 //! Plain Kismet caches are simply directories where the cache entry for
@@ -88,27 +91,20 @@
 //!
 //! Simple usage should be covered by the [`ReadOnlyCache`] or
 //! [`Cache`] structs, which wrap [`plain::Cache`] and
-//! [`sharded::Cache`] in a convenient type-erased interface.  The
-//! caches *do not* invoke [`std::fs::File::sync_all`] or [`std::fs::File::sync_data`]:
-//! the caller should sync files before letting Kismet persist them in
-//! a cache if necessary.  File synchronisation is not automatic
-//! because it makes sense to implement persistent filesystem caches
-//! that are erased after each boot, e.g., via
-//! [tmpfiles.d](https://www.freedesktop.org/software/systemd/man/tmpfiles.d.html),
-//! or by tagging cache directories with a
-//! [boot id](https://man7.org/linux/man-pages/man3/sd_id128_get_machine.3.html).
+//! [`sharded::Cache`] in a convenient type-erased interface.
 //!
-//! The cache code also does not sync the parent cache directories: we
-//! assume that it's safe, if unfortunate, for caches to lose data or
-//! revert to an older state after kernel or hardware crashes.  In
-//! general, the code attempts to be robust again direct manipulation
-//! of the cache directories.  It's always safe to delete cache files
-//! from kismet directories (ideally not recently created files in
-//! `.kismet_temp` directories), and even *adding* files should mostly
-//! do what one expects: they will be picked up if they're in the
-//! correct place (in a plain unsharded cache directory or in the
-//! correct shard subdirectory), and eventually evicted if useless or
-//! in the wrong shard.
+//! While the cache code syncs cached data files by default, it does
+//! not sync the parent cache directories: we assume that it's safe,
+//! if unfortunate, for caches to lose data or revert to an older
+//! state after kernel or hardware crashes.  In general, the code
+//! attempts to be robust again direct manipulation of the cache
+//! directories.  It's always safe to delete cache files from kismet
+//! directories (ideally not recently created files in `.kismet_temp`
+//! subdirectories), and even *adding* files should mostly do what one
+//! expects: they will be picked up if they're in the correct place
+//! (in a plain unsharded cache directory or in the correct shard
+//! subdirectory), and eventually evicted if useless or in the wrong
+//! shard.
 //!
 //! It is however essential to only publish files atomically to the
 //! cache directories, and it probably never makes sense to modify
@@ -180,10 +176,7 @@
 //! // Fetches the current cached value for `key`, or populates it with
 //! // the closure argument if missing.
 //! let mut cached_file = cache
-//!     .ensure(&key, |file| {
-//!         file.write_all(&get_contents(&key))?;
-//!         file.sync_all()
-//!     })?;
+//!     .ensure(&key, |file| file.write_all(&get_contents(&key)))?;
 //! let mut contents = Vec::new();
 //! cached_file.read_to_end(&mut contents)?;
 //! # Ok(())
@@ -226,7 +219,7 @@
 //! Kismet will always store its internal data in files or directories
 //! start start with a `.kismet` prefix, and cached data lives in
 //! files with names equal to their keys.  Since Kismet sanitises
-//! cache keys to forbid them from starting with `.`, `/`, or `\\`, it
+//! cache keys to forbid them from starting with `.`, `/`, or `\`, it
 //! is always safe for an application to store additional data in
 //! files or directories that start with a `.`, as long as they do not
 //! collide with the `.kismet` prefix.
@@ -247,7 +240,7 @@ pub use stack::CacheHit;
 pub use stack::CacheHitAction;
 
 /// Kismet cache directories put temporary files under this
-/// subdirectory.
+/// subdirectory in each cache or cache shard directory.
 pub const KISMET_TEMPORARY_SUBDIRECTORY: &str = ".kismet_temp";
 
 /// Cache keys consist of a filename and two hash values.  The two

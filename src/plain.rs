@@ -8,7 +8,11 @@
 //! in flat directories.
 //!
 //! This module is useful for lower level usage; in most cases, the
-//! [`crate::Cache`] is more convenient and just as efficient.
+//! [`crate::Cache`] is more convenient and just as efficient.  In
+//! particular, a `crate::plain::Cache` *does not* invoke
+//! [`std::fs::File::sync_all`] or [`std::fs::File::sync_data`]: the
+//! caller should sync files before letting Kismet persist them in a
+//! directory, if necessary.
 //!
 //! The cache's contents will grow past its stated capacity, but
 //! should rarely reach more than twice that capacity.

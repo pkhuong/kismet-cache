@@ -103,10 +103,21 @@ impl FullCache for ShardedCache {
 /// always first access its write-side cache (if defined), and, on
 /// misses, will attempt to service [`Cache::get`] and
 /// [`Cache::touch`] calls by iterating over the read-only caches.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CacheBuilder {
     write_side: Option<Arc<dyn FullCache>>,
+    auto_sync: bool,
     read_side: ReadOnlyCacheBuilder,
+}
+
+impl Default for CacheBuilder {
+    fn default() -> CacheBuilder {
+        CacheBuilder {
+            write_side: None,
+            auto_sync: true,
+            read_side: Default::default(),
+        }
+    }
 }
 
 /// A [`Cache`] wraps either up to one plain or sharded read-write
@@ -122,10 +133,28 @@ pub struct CacheBuilder {
 /// of directories: using the same [`Cache`] object improves the
 /// accuracy of the write cache's lock-free in-memory statistics, when
 /// it's a sharded cache.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Cache {
+    // The write-side cache services writes and is the cache of first
+    // resort for `get` and `touch`.
     write_side: Option<Arc<dyn FullCache>>,
+    // Whether to automatically sync file contents before publishing
+    // them to the write-side cache.
+    auto_sync: bool,
+    // The read-side cache (a list of read-only caches) services `get`
+    // and `touch` calls when we fail to find something in the
+    // write-side cache.
     read_side: ReadOnlyCache,
+}
+
+impl Default for Cache {
+    fn default() -> Cache {
+        Cache {
+            write_side: None,
+            auto_sync: true,
+            read_side: Default::default(),
+        }
+    }
 }
 
 /// Where does a cache hit come from: the primary read-write cache, or
@@ -195,6 +224,26 @@ impl CacheBuilder {
         self
     }
 
+    /// Sets whether files published read-write cache will be
+    /// automatically flushed to disk with [`File::sync_all`]
+    /// before sending them to the cache directory.
+    ///
+    /// Defaults to true, for safety.  Even when `auto_sync` is
+    /// enabled, Kismet does not `fsync` cache directories; after a
+    /// kernel or hardware crash, caches may partially revert to an
+    /// older state, but should not contain incomplete files.
+    ///
+    /// An application may want to disable `auto_sync` because it
+    /// already synchronises files, or because the cache directories
+    /// do not survive crashes: they might be erased after each boot,
+    /// e.g., via
+    /// [tmpfiles.d](https://www.freedesktop.org/software/systemd/man/tmpfiles.d.html),
+    /// or tagged with a [boot id](https://man7.org/linux/man-pages/man3/sd_id128_get_machine.3.html).
+    pub fn auto_sync(mut self, sync: bool) -> Self {
+        self.auto_sync = sync;
+        self
+    }
+
     /// Adds a new read-only cache directory at `path` to the end of the
     /// cache builder's search list.
     ///
@@ -224,12 +273,46 @@ impl CacheBuilder {
     pub fn build(self) -> Cache {
         Cache {
             write_side: self.write_side,
+            auto_sync: self.auto_sync,
             read_side: self.read_side.build(),
         }
     }
 }
 
 impl Cache {
+    /// Calls [`File::sync_all`] on `file` if `Cache::auto_sync`
+    /// is true.
+    #[inline]
+    fn maybe_sync(&self, file: &File) -> Result<()> {
+        if self.auto_sync {
+            file.sync_all()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Opens `path` and calls [`File::sync_all`] on the resulting
+    /// file, if `Cache::auto_sync` is true.
+    ///
+    /// Panics when [`File::sync_all`] fails. See
+    /// https://wiki.postgresql.org/wiki/Fsync_Errors or
+    /// Rebello et al's "Can Applications Recover from fsync Failures?"
+    /// (https://www.usenix.org/system/files/atc20-rebello.pdf)
+    /// for an idea of the challenges associated with handling
+    /// fsync failures on persistent files.
+    fn maybe_sync_path(&self, path: &Path) -> Result<()> {
+        if self.auto_sync {
+            // It's really not clear what happens to a file's content
+            // if we open it just before fsync, and fsync fails.  It
+            // should be safe to just unlink the file
+            std::fs::File::open(&path)?
+                .sync_all()
+                .expect("auto_sync failed, and failure semantics are unclear for fsync");
+        }
+
+        Ok(())
+    }
+
     /// Attempts to open a read-only file for `key`.  The `Cache` will
     /// query each its write cache (if any), followed by the list of
     /// additional read-only cache, in definition order, and return a
@@ -328,17 +411,19 @@ impl Cache {
         }
 
         // Promotes `file` to `cache`.
-        fn promote(cache: &dyn FullCache, key: Key, mut file: File) -> Result<File> {
+        fn promote(cache: &dyn FullCache, sync: bool, key: Key, mut file: File) -> Result<File> {
             use std::io::Seek;
 
             let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
             std::io::copy(&mut file, tmp.as_file_mut())?;
 
             // Force the destination file's contents to disk before
-            // adding it to the read-write cache: the caller can't
-            // tell us whether they want a `fsync`, so let's be safe
-            // and assume they do.
-            tmp.as_file().sync_all()?;
+            // adding it to the read-write cache, if we're supposed to
+            // sync files automatically.
+            if sync {
+                tmp.as_file().sync_all()?;
+            }
+
             cache.put(key, tmp.path())?;
 
             // We got a read-only file.  Rewind it before returning.
@@ -360,7 +445,9 @@ impl Cache {
         } else if let Some(mut file) = self.read_side.get(key)? {
             match judge(CacheHit::Secondary(&mut file)) {
                 CacheHitAction::Accept => return Ok(file),
-                CacheHitAction::Promote => return promote(get_write_cache(self)?, key, file),
+                CacheHitAction::Promote => {
+                    return promote(get_write_cache(self)?, self.auto_sync, key, file)
+                }
                 CacheHitAction::Replace => old = Some(file),
             }
         }
@@ -370,6 +457,7 @@ impl Cache {
         // Either way, start by populating a temporary file.
         let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
         populate(tmp.as_file_mut(), old)?;
+        self.maybe_sync(tmp.as_file())?;
 
         // Grab a read-only return value before publishing the file.
         let path = tmp.path();
@@ -397,14 +485,24 @@ impl Cache {
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     ///
+    /// When `auto_sync` is enabled (the default), the file at `value`
+    /// will always be [`File::sync_all`]ed before publishing to the
+    /// cache.  Kismet will **panic** when the [`File::sync_all`] call
+    /// itself fails: retrying the same call to [`Cache::set`] could
+    /// erroneously succeed, since some filesystems clear internal I/O
+    /// failure flag after the first `fsync`.
+    ///
     /// Executes in a bounded number of file operations, except for
     /// the lock-free maintenance, which needs time linearithmic in
     /// the number of files in the directory chosen for maintenance,
-    /// amortised to logarithmic.
+    /// amortised to logarithmic, and constant number of file operations.
     pub fn set<'a>(&self, key: impl Into<Key<'a>>, value: impl AsRef<Path>) -> Result<()> {
         fn doit(this: &Cache, key: Key, value: &Path) -> Result<()> {
             match this.write_side.as_ref() {
-                Some(write) => write.set(key, value),
+                Some(write) => {
+                    this.maybe_sync_path(value)?;
+                    write.set(key, value)
+                }
                 None => Err(Error::new(
                     ErrorKind::Unsupported,
                     "no kismet write cache defined",
@@ -426,14 +524,24 @@ impl Cache {
     /// Always consumes the file at `value` on success; may consume it
     /// on error.
     ///
+    /// When `auto_sync` is enabled (the default), the file at `value`
+    /// will always be [`File::sync_all`]ed before publishing to the
+    /// cache.  Kismet will **panic** when the [`File::sync_all`] call
+    /// itself fails: retrying the same call to [`Cache::put`] could
+    /// erroneously succeed, since some filesystems clear internal I/O
+    /// failure flag after the first `fsync`.
+    ///
     /// Executes in a bounded number of file operations, except for
     /// the lock-free maintenance, which needs time linearithmic in
     /// the number of files in the directory chosen for maintenance,
-    /// amortised to logarithmic.
+    /// amortised to logarithmic, and constant number of file operations.
     pub fn put<'a>(&self, key: impl Into<Key<'a>>, value: impl AsRef<Path>) -> Result<()> {
         fn doit(this: &Cache, key: Key, value: &Path) -> Result<()> {
             match this.write_side.as_ref() {
-                Some(write) => write.put(key, value),
+                Some(write) => {
+                    this.maybe_sync_path(value)?;
+                    write.put(key, value)
+                }
                 None => Err(Error::new(
                     ErrorKind::Unsupported,
                     "no kismet write cache defined",
@@ -513,17 +621,42 @@ mod test {
     // write calls should fail.
     #[test]
     fn empty() {
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp().create("foo", FileType::RandomFile(10));
         let cache: Cache = Default::default();
 
         assert!(matches!(cache.get(&TestKey::new("foo")), Ok(None)));
         assert!(
             matches!(cache.ensure(&TestKey::new("foo"), |_| unreachable!("should not be called when there is no write side")),
-                         Err(e) if e.kind() == ErrorKind::Unsupported)
+                     Err(e) if e.kind() == ErrorKind::Unsupported)
         );
-        assert!(matches!(cache.set(&TestKey::new("foo"), "/tmp/foo"),
+        assert!(matches!(cache.set(&TestKey::new("foo"), &temp.path("foo")),
                          Err(e) if e.kind() == ErrorKind::Unsupported));
-        assert!(matches!(cache.put(&TestKey::new("foo"), "/tmp/foo"),
+        assert!(matches!(cache.put(&TestKey::new("foo"), &temp.path("foo")),
                          Err(e) if e.kind() == ErrorKind::Unsupported));
+        assert!(matches!(cache.touch(&TestKey::new("foo")), Ok(false)));
+    }
+
+    // Disable autosync; we should get an `Unsupported` error even if the
+    // input file does not exist.
+    #[test]
+    fn empty_no_auto_sync() {
+        let cache = CacheBuilder::new().auto_sync(false).build();
+
+        assert!(matches!(cache.get(&TestKey::new("foo")), Ok(None)));
+        assert!(
+            matches!(cache.ensure(&TestKey::new("foo"), |_| unreachable!("should not be called when there is no write side")),
+                     Err(e) if e.kind() == ErrorKind::Unsupported)
+        );
+        assert!(
+            matches!(cache.set(&TestKey::new("foo"), "/no-such-tmp/foo"),
+                     Err(e) if e.kind() == ErrorKind::Unsupported)
+        );
+        assert!(
+            matches!(cache.put(&TestKey::new("foo"), "/no-such-tmp/foo"),
+                     Err(e) if e.kind() == ErrorKind::Unsupported)
+        );
         assert!(matches!(cache.touch(&TestKey::new("foo")), Ok(false)));
     }
 
@@ -534,7 +667,11 @@ mod test {
         use test_dir::{DirBuilder, TestDir};
 
         let temp = TestDir::temp();
-        let cache = CacheBuilder::new().writer(temp.path("."), 1, 10).build();
+        // Get some coverage for no-auto_sync config.
+        let cache = CacheBuilder::new()
+            .writer(temp.path("."), 1, 10)
+            .auto_sync(false)
+            .build();
         let key = TestKey::new("foo");
 
         // The file doesn't exist initially.
