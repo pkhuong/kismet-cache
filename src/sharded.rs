@@ -56,9 +56,16 @@ pub struct Cache {
     shard_capacity: usize,
 }
 
+/// Converts a shard id to a subdirectory name.
+///
+/// We use a dot prefix because the resulting subdirectory names are
+/// guaranteed not to collide with "plain" cache filenames.  This
+/// means we can switch between the sharded and plain (unsharded)
+/// strategy for the same directory, without any chance of
+/// misinterpreted file name.
 #[inline]
 fn format_id(shard: usize) -> String {
-    format!("{:04x}", shard)
+    format!(".kismet_{:04x}", shard)
 }
 
 /// We create short-lived Shard objects whenever we want to work with
