@@ -475,6 +475,16 @@ impl Cache {
         Ok(ret)
     }
 
+    fn set_impl(&self, key: Key, value: &Path) -> Result<()> {
+        match self.write_side.as_ref() {
+            Some(write) => write.set(key, value),
+            None => Err(Error::new(
+                ErrorKind::Unsupported,
+                "no kismet write cache defined",
+            )),
+        }
+    }
+
     /// Inserts or overwrites the file at `value` as `key` in the
     /// write cache directory.  This will always fail with
     /// [`ErrorKind::Unsupported`] if no write cache was defined.
@@ -498,19 +508,21 @@ impl Cache {
     /// amortised to logarithmic, and constant number of file operations.
     pub fn set<'a>(&self, key: impl Into<Key<'a>>, value: impl AsRef<Path>) -> Result<()> {
         fn doit(this: &Cache, key: Key, value: &Path) -> Result<()> {
-            match this.write_side.as_ref() {
-                Some(write) => {
-                    this.maybe_sync_path(value)?;
-                    write.set(key, value)
-                }
-                None => Err(Error::new(
-                    ErrorKind::Unsupported,
-                    "no kismet write cache defined",
-                )),
-            }
+            this.maybe_sync_path(value)?;
+            this.set_impl(key, value)
         }
 
         doit(self, key.into(), value.as_ref())
+    }
+
+    fn put_impl(&self, key: Key, value: &Path) -> Result<()> {
+        match self.write_side.as_ref() {
+            Some(write) => write.put(key, value),
+            None => Err(Error::new(
+                ErrorKind::Unsupported,
+                "no kismet write cache defined",
+            )),
+        }
     }
 
     /// Inserts the file at `value` as `key` in the cache directory if
@@ -537,16 +549,8 @@ impl Cache {
     /// amortised to logarithmic, and constant number of file operations.
     pub fn put<'a>(&self, key: impl Into<Key<'a>>, value: impl AsRef<Path>) -> Result<()> {
         fn doit(this: &Cache, key: Key, value: &Path) -> Result<()> {
-            match this.write_side.as_ref() {
-                Some(write) => {
-                    this.maybe_sync_path(value)?;
-                    write.put(key, value)
-                }
-                None => Err(Error::new(
-                    ErrorKind::Unsupported,
-                    "no kismet write cache defined",
-                )),
-            }
+            this.maybe_sync_path(value)?;
+            this.put_impl(key, value)
         }
 
         doit(self, key.into(), value.as_ref())
