@@ -402,13 +402,17 @@ impl Cache {
     /// the number of files in the directory chosen for maintenance,
     /// amortised to logarithmic.
     pub fn set<'a>(&self, key: impl Into<Key<'a>>, value: impl AsRef<Path>) -> Result<()> {
-        match self.write_side.as_ref() {
-            Some(write) => write.set(key.into(), value.as_ref()),
-            None => Err(Error::new(
-                ErrorKind::Unsupported,
-                "no kismet write cache defined",
-            )),
+        fn doit(this: &Cache, key: Key, value: &Path) -> Result<()> {
+            match this.write_side.as_ref() {
+                Some(write) => write.set(key, value),
+                None => Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "no kismet write cache defined",
+                )),
+            }
         }
+
+        doit(self, key.into(), value.as_ref())
     }
 
     /// Inserts the file at `value` as `key` in the cache directory if
@@ -427,13 +431,17 @@ impl Cache {
     /// the number of files in the directory chosen for maintenance,
     /// amortised to logarithmic.
     pub fn put<'a>(&self, key: impl Into<Key<'a>>, value: impl AsRef<Path>) -> Result<()> {
-        match self.write_side.as_ref() {
-            Some(write) => write.put(key.into(), value.as_ref()),
-            None => Err(Error::new(
-                ErrorKind::Unsupported,
-                "no kismet write cache defined",
-            )),
+        fn doit(this: &Cache, key: Key, value: &Path) -> Result<()> {
+            match this.write_side.as_ref() {
+                Some(write) => write.put(key, value),
+                None => Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "no kismet write cache defined",
+                )),
+            }
         }
+
+        doit(self, key.into(), value.as_ref())
     }
 
     /// Marks a cache entry for `key` as accessed (read).  The [`Cache`]
