@@ -31,6 +31,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
 use crate::cache_dir::CacheDir;
+use crate::multiplicative_hash::MultiplicativeHash;
 use crate::trigger::PeriodicTrigger;
 use crate::Key;
 use crate::KISMET_TEMPORARY_SUBDIRECTORY as TEMP_SUBDIR;
@@ -40,9 +41,14 @@ use crate::KISMET_TEMPORARY_SUBDIRECTORY as TEMP_SUBDIR;
 /// shard capacity inserts or updates.
 const MAINTENANCE_SCALE: usize = 2;
 
-const RANDOM_MULTIPLIER: u64 = 0xf2efdf1111adba6f;
+/// These mixers must be the same for all processes that access the
+/// same sharded cache directory.  That's why we derive the parameters
+/// in a const function.
+const PRIMARY_MIXER: MultiplicativeHash =
+    MultiplicativeHash::new_keyed(b"kismet: primary shard mixer");
 
-const SECONDARY_RANDOM_MULTIPLIER: u64 = 0xa55e1e02718a6a47;
+const SECONDARY_MIXER: MultiplicativeHash =
+    MultiplicativeHash::new_keyed(b"kismet: secondary shard mixer");
 
 /// A sharded cache is a hash-sharded directory of cache
 /// subdirectories.  Each subdirectory is managed as an
@@ -189,18 +195,12 @@ impl Cache {
     fn shard_ids(&self, key: Key) -> (usize, usize) {
         // We can't assume the hash is well distributed, so mix it
         // around a bit with a multiplicative hash.
-        let remap = |x: u64, mul: u64| {
-            let hash = x.wrapping_mul(mul) as u128;
-            // Map the hashed hash to a shard id with a fixed point
-            // multiplication.
-            ((self.num_shards as u128 * hash) >> 64) as usize
-        };
+        let h1 = PRIMARY_MIXER.map(key.hash, self.num_shards);
+        let h2 = SECONDARY_MIXER.map(key.secondary_hash, self.num_shards);
 
         // We do not apply a 2-left strategy because our load
         // estimates can saturate.  When that happens, we want to
         // revert to sharding based on `key.hash`.
-        let h1 = remap(key.hash, RANDOM_MULTIPLIER);
-        let h2 = remap(key.secondary_hash, SECONDARY_RANDOM_MULTIPLIER);
         (h1, self.other_shard_id(h1, h2))
     }
 

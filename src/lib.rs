@@ -224,6 +224,7 @@
 //! files or directories that start with a `.`, as long as they do not
 //! collide with the `.kismet` prefix.
 mod cache_dir;
+mod multiplicative_hash;
 pub mod plain;
 pub mod raw_cache;
 mod readonly;
