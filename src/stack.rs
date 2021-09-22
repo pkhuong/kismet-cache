@@ -373,11 +373,15 @@ impl Cache {
 
         // Grab a read-only return value before publishing the file.
         let path = tmp.path();
-        let ret = File::open(path)?;
+        let mut ret = File::open(path)?;
         if replace {
             cache.set(key, path)?;
         } else {
             cache.put(key, path)?;
+            // Return the now-cached file, if we can get it.
+            if let Ok(Some(file)) = cache.get(key) {
+                ret = file;
+            }
         }
 
         Ok(ret)
