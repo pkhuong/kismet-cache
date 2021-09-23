@@ -184,8 +184,16 @@ pub(crate) trait CacheDir {
         let mut dst = self.base_dir().into_owned();
 
         let ret = self.maybe_cleanup(&dst)?;
-        ensure_directory(&dst)?;
+        // Optimistically try to publish the file, without
+        // making sure the directory exists: if this works,
+        // the directory must have been found.
         dst.push(name);
+        if raw_cache::insert_or_update(value, &dst).is_ok() {
+            return Ok(ret);
+        }
+
+        // We just pushed `name`, we must have a parent.
+        std::fs::create_dir_all(dst.parent().expect("must have parent"))?;
         raw_cache::insert_or_update(value, &dst)?;
         Ok(ret)
     }
@@ -204,8 +212,13 @@ pub(crate) trait CacheDir {
         let mut dst = self.base_dir().into_owned();
 
         let ret = self.maybe_cleanup(&dst)?;
-        ensure_directory(&dst)?;
+
         dst.push(name);
+        if raw_cache::insert_or_touch(value, &dst).is_ok() {
+            return Ok(ret);
+        }
+
+        std::fs::create_dir_all(dst.parent().expect("must have parent"))?;
         raw_cache::insert_or_touch(value, &dst)?;
         Ok(ret)
     }
