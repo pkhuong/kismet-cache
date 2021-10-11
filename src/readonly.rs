@@ -10,9 +10,21 @@ use std::io::Result;
 use std::path::Path;
 use std::sync::Arc;
 
+use derivative::Derivative;
+
 use crate::plain::Cache as PlainCache;
 use crate::sharded::Cache as ShardedCache;
 use crate::Key;
+
+/// A `ConsistencyChecker` function compares cached values for the
+/// same key and returns `Err` when the values are incompatible.
+type ConsistencyChecker = Arc<
+    dyn Fn(&mut File, &mut File) -> Result<()>
+        + Sync
+        + Send
+        + std::panic::RefUnwindSafe
+        + std::panic::UnwindSafe,
+>;
 
 /// The `ReadSide` trait offers `get` and `touch`, as implemented by
 /// both plain and sharded caches.
@@ -55,10 +67,15 @@ impl ReadSide for ShardedCache {
 /// cache will access each constituent cache directory in the order
 /// they were added.
 ///
-/// The default builder is a fresh builder with no constituent cache.
-#[derive(Debug, Default)]
+/// The default builder is a fresh builder with no constituent cache
+/// and no consistency check function.
+#[derive(Default, Derivative)]
+#[derivative(Debug)]
 pub struct ReadOnlyCacheBuilder {
     stack: Vec<Box<dyn ReadSide>>,
+
+    #[derivative(Debug = "ignore")]
+    consistency_checker: Option<ConsistencyChecker>,
 }
 
 /// A [`ReadOnlyCache`] wraps an arbitrary number of
@@ -68,22 +85,78 @@ pub struct ReadOnlyCacheBuilder {
 /// interface hides the difference between plain and sharded cache
 /// directories, and should be the first resort for read-only uses.
 ///
-/// The default cache wraps an empty set of constituent caches.
+/// The default cache wraps an empty set of constituent caches and
+/// performs no consistency check.
 ///
 /// [`ReadOnlyCache`] objects are stateless and cheap to clone; don't
 /// put an [`Arc`] on them.  Avoid creating multiple
 /// [`ReadOnlyCache`]s for the same stack of directories: there is no
 /// internal state to maintain, so multiple instances simply waste
 /// memory without any benefit.
-#[derive(Clone, Debug)]
+#[derive(Clone, Derivative)]
+#[derivative(Debug)]
 pub struct ReadOnlyCache {
     stack: Arc<[Box<dyn ReadSide>]>,
+
+    /// When populated, the `ReadOnlyCache` keeps searching after the
+    /// first cache hit, and compares subsequent hits with the first one
+    /// by calling the `consistency_checker` function.  That function
+    /// should return `Ok(())` if the two files are compatible (identical),
+    /// and `Err` otherwise.
+    #[derivative(Debug = "ignore")]
+    consistency_checker: Option<ConsistencyChecker>,
 }
 
 impl ReadOnlyCacheBuilder {
     /// Returns a fresh empty builder.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the consistency checker function: when the function is
+    /// provided, the `ReadOnlyCache` will keep searching after the
+    /// first cache hit, and compare subsequent hits with the first
+    /// one by calling `checker`.  The `checker` function should
+    /// return `Ok(())` if the two files are compatible (identical),
+    /// and `Err` otherwise.
+    ///
+    /// Kismet will propagate the error on mismatch.
+    pub fn consistency_checker(
+        self,
+        checker: impl Fn(&mut File, &mut File) -> Result<()>
+            + Sync
+            + Send
+            + std::panic::RefUnwindSafe
+            + std::panic::UnwindSafe
+            + Sized
+            + 'static,
+    ) -> Self {
+        self.arc_consistency_checker(Some(Arc::new(checker)))
+    }
+
+    /// Removes the consistency checker function, if any.
+    pub fn clear_consistency_checker(self) -> Self {
+        self.arc_consistency_checker(None)
+    }
+
+    /// Sets the consistency checker function.  `None` clears the
+    /// checker function.  See
+    /// [`ReadOnlyCacheBuilder::consistency_checker`].
+    #[allow(clippy::type_complexity)] // We want the public type to be transparent
+    pub fn arc_consistency_checker(
+        mut self,
+        checker: Option<
+            Arc<
+                dyn Fn(&mut File, &mut File) -> Result<()>
+                    + Sync
+                    + Send
+                    + std::panic::RefUnwindSafe
+                    + std::panic::UnwindSafe,
+            >,
+        >,
+    ) -> Self {
+        self.consistency_checker = checker;
+        self
     }
 
     /// Adds a new cache directory at `path` to the end of the cache
@@ -126,20 +199,24 @@ impl ReadOnlyCacheBuilder {
     /// Returns a fresh [`ReadOnlyCache`] for the builder's search list
     /// of constituent cache directories.
     pub fn build(self) -> ReadOnlyCache {
-        ReadOnlyCache::new(self.stack)
+        ReadOnlyCache::new(self.stack, self.consistency_checker)
     }
 }
 
 impl Default for ReadOnlyCache {
     fn default() -> ReadOnlyCache {
-        ReadOnlyCache::new(Default::default())
+        ReadOnlyCache::new(Default::default(), None)
     }
 }
 
 impl ReadOnlyCache {
-    fn new(stack: Vec<Box<dyn ReadSide>>) -> ReadOnlyCache {
+    fn new(
+        stack: Vec<Box<dyn ReadSide>>,
+        consistency_checker: Option<ConsistencyChecker>,
+    ) -> ReadOnlyCache {
         ReadOnlyCache {
             stack: stack.into_boxed_slice().into(),
+            consistency_checker,
         }
     }
 
@@ -158,21 +235,41 @@ impl ReadOnlyCache {
     /// In the worst case, each call to `get` attempts to open two
     /// files for each cache directory in the `ReadOnlyCache` stack.
     pub fn get<'a>(&self, key: impl Into<Key<'a>>) -> Result<Option<File>> {
-        fn doit(stack: &[Box<dyn ReadSide>], key: Key) -> Result<Option<File>> {
+        fn doit(
+            stack: &[Box<dyn ReadSide>],
+            checker: &Option<ConsistencyChecker>,
+            key: Key,
+        ) -> Result<Option<File>> {
+            use std::io::Seek;
+            use std::io::SeekFrom;
+
+            let mut ret = None;
             for cache in stack.iter() {
-                if let Some(ret) = cache.get(key)? {
-                    return Ok(Some(ret));
+                let mut hit = match cache.get(key)? {
+                    Some(hit) => hit,
+                    None => continue,
+                };
+
+                match checker {
+                    None => return Ok(Some(hit)),
+                    Some(checker) => match ret.as_mut() {
+                        None => ret = Some(hit),
+                        Some(prev) => {
+                            checker(prev, &mut hit)?;
+                            prev.seek(SeekFrom::Start(0))?;
+                        }
+                    },
                 }
             }
 
-            Ok(None)
+            Ok(ret)
         }
 
         if self.stack.is_empty() {
             return Ok(None);
         }
 
-        doit(&*self.stack, key.into())
+        doit(&*self.stack, &self.consistency_checker, key.into())
     }
 
     /// Marks a cache entry for `key` as accessed (read).  The
@@ -209,6 +306,11 @@ impl ReadOnlyCache {
 
 #[cfg(test)]
 mod test {
+    use std::fs::File;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
     use crate::plain::Cache as PlainCache;
     use crate::sharded::Cache as ShardedCache;
     use crate::Key;
@@ -233,6 +335,27 @@ mod test {
         }
     }
 
+    fn byte_equality_checker(
+        counter: Arc<AtomicU64>,
+    ) -> impl 'static + Fn(&mut File, &mut File) -> std::io::Result<()> {
+        use std::io::Read;
+
+        move |x: &mut File, y: &mut File| {
+            let mut x_contents = Vec::new();
+            let mut y_contents = Vec::new();
+
+            counter.fetch_add(1, Ordering::Relaxed);
+            x.read_to_end(&mut x_contents)?;
+            y.read_to_end(&mut y_contents)?;
+
+            if x_contents == y_contents {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "mismatch"))
+            }
+        }
+    }
+
     /// A stack of 0 caches should always succeed with a trivial result.
     #[test]
     fn empty() {
@@ -240,6 +363,109 @@ mod test {
 
         assert!(matches!(ro.get(Key::new("foo", 1, 2)), Ok(None)));
         assert!(matches!(ro.touch(Key::new("foo", 1, 2)), Ok(false)));
+    }
+
+    /// Populate two plain caches and set a consistency checker.  We
+    /// should access both.
+    #[test]
+    fn consistency_checker_success() {
+        use std::io::Read;
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("first", FileType::Dir)
+            .create("second", FileType::Dir)
+            .create("first/0", FileType::ZeroFile(2))
+            .create("second/0", FileType::ZeroFile(2))
+            .create("first/1", FileType::RandomFile(10))
+            .create("second/2", FileType::RandomFile(10));
+
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let ro = ReadOnlyCacheBuilder::new()
+            .plain(temp.path("first"))
+            .plain(temp.path("second"))
+            .consistency_checker(byte_equality_checker(counter.clone()))
+            .build();
+
+        let mut hit = ro
+            .get(&TestKey::new("0"))
+            .expect("must succeed")
+            .expect("must exist");
+
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        let mut contents = Vec::new();
+        hit.read_to_end(&mut contents).expect("read should succeed");
+        assert_eq!(contents, "00".as_bytes());
+
+        let _ = ro
+            .get(&TestKey::new("1"))
+            .expect("must succeed")
+            .expect("must exist");
+        // Only found in one subcache, there's nothing to check.
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        let _ = ro
+            .get(&TestKey::new("2"))
+            .expect("must succeed")
+            .expect("must exist");
+        // Only found in one subcache, there's nothing to check.
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    /// Populate two plain caches and set a consistency checker.  We
+    /// should error on mismatch.
+    #[test]
+    fn consistency_checker_failure() {
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("first", FileType::Dir)
+            .create("second", FileType::Dir)
+            .create("first/0", FileType::ZeroFile(2))
+            .create("second/0", FileType::ZeroFile(3));
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let ro = ReadOnlyCacheBuilder::new()
+            .plain(temp.path("first"))
+            .plain(temp.path("second"))
+            .consistency_checker(byte_equality_checker(counter))
+            .build();
+
+        // This call should error.
+        assert!(ro.get(&TestKey::new("0")).is_err());
+    }
+
+    /// Populate two plain caches and unset the consistency checker.  We
+    /// should not error.
+    #[test]
+    fn consistency_checker_silent_failure() {
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("first", FileType::Dir)
+            .create("second", FileType::Dir)
+            .create("first/0", FileType::ZeroFile(2))
+            .create("second/0", FileType::ZeroFile(3));
+
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let ro = ReadOnlyCacheBuilder::new()
+            .plain(temp.path("first"))
+            .plain(temp.path("second"))
+            .consistency_checker(byte_equality_checker(counter.clone()))
+            .clear_consistency_checker()
+            .build();
+
+        // This call should not error.
+        let _ = ro
+            .get(&TestKey::new("0"))
+            .expect("must succeed")
+            .expect("must exist");
+
+        // There should be no call to the checker function.
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 
     /// Populate a plain and a sharded cache. We should be able to access
