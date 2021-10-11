@@ -538,14 +538,35 @@ impl Cache {
 
             match judge(CacheHit::Primary(&mut file)) {
                 // Promote is a no-op if the file is already in the write cache.
-                CacheHitAction::Accept | CacheHitAction::Promote => return Ok(file),
+                CacheHitAction::Accept | CacheHitAction::Promote => {
+                    if let Some(checker) = self.consistency_checker.as_ref() {
+                        let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
+                        populate(tmp.as_file_mut(), None)?;
+                        tmp.as_file_mut().seek(SeekFrom::Start(0))?;
+                        checker(&mut file, tmp.as_file_mut())?;
+                        file.seek(SeekFrom::Start(0))?;
+                    }
+
+                    return Ok(file);
+                }
                 CacheHitAction::Replace => old = Some(file),
             }
         } else if let Some(mut file) = self.read_side.get(key)? {
             match judge(CacheHit::Secondary(&mut file)) {
-                CacheHitAction::Accept => return Ok(file),
-                CacheHitAction::Promote => {
-                    return promote(get_write_cache(self)?, self.auto_sync, key, file)
+                j @ CacheHitAction::Accept | j @ CacheHitAction::Promote => {
+                    if let Some(checker) = self.consistency_checker.as_ref() {
+                        let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
+                        populate(tmp.as_file_mut(), None)?;
+                        tmp.as_file_mut().seek(SeekFrom::Start(0))?;
+                        checker(&mut file, tmp.as_file_mut())?;
+                        file.seek(SeekFrom::Start(0))?;
+                    }
+
+                    return if matches!(j, CacheHitAction::Accept) {
+                        Ok(file)
+                    } else {
+                        promote(get_write_cache(self)?, self.auto_sync, key, file)
+                    };
                 }
                 CacheHitAction::Replace => old = Some(file),
             }
@@ -825,6 +846,7 @@ mod test {
     #[test]
     fn consistency_checker_success() {
         use std::io::Read;
+        use std::io::Write;
         use test_dir::{DirBuilder, FileType, TestDir};
 
         let temp = TestDir::temp()
@@ -832,8 +854,9 @@ mod test {
             .create("second", FileType::Dir)
             .create("first/0", FileType::ZeroFile(2))
             .create("second/0", FileType::ZeroFile(2))
-            .create("first/1", FileType::RandomFile(10))
-            .create("second/2", FileType::RandomFile(10));
+            .create("first/1", FileType::ZeroFile(1))
+            .create("second/2", FileType::ZeroFile(3))
+            .create("second/3", FileType::ZeroFile(3));
 
         let counter = Arc::new(AtomicU64::new(0));
 
@@ -860,12 +883,13 @@ mod test {
         // Do the same via `ensure`.
         {
             let mut populated = cache
-                .ensure(&TestKey::new("0"), |_| {
-                    unreachable!("should not be called for an extant file")
+                .ensure(&TestKey::new("0"), |dst: &mut File| {
+                    dst.write_all("00".as_bytes())?;
+                    Ok(())
                 })
                 .expect("ensure must succeed");
 
-            assert_eq!(counter.load(Ordering::Relaxed), 2);
+            assert_eq!(counter.load(Ordering::Relaxed), 3);
 
             let mut contents = Vec::new();
             populated
@@ -874,32 +898,119 @@ mod test {
             assert_eq!(contents, "00".as_bytes());
         }
 
+        counter.store(0, Ordering::Relaxed);
         let _ = cache
             .get(&TestKey::new("1"))
             .expect("must succeed")
             .expect("must exist");
         // Only found in the writer, there's nothing to check.
-        assert_eq!(counter.load(Ordering::Relaxed), 2);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
 
+        // Do the same via `ensure`.
+        {
+            let mut populated = cache
+                .ensure(&TestKey::new("1"), |dst| {
+                    dst.write_all("0".as_bytes())?;
+                    Ok(())
+                })
+                .expect("ensure must succeed");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+            let mut contents = Vec::new();
+            populated
+                .read_to_end(&mut contents)
+                .expect("read should succeed");
+            assert_eq!(contents, "0".as_bytes());
+        }
+
+        counter.store(0, Ordering::Relaxed);
         let _ = cache
             .get(&TestKey::new("2"))
             .expect("must succeed")
             .expect("must exist");
         // Only found in the read cache, there's nothing to check.
-        assert_eq!(counter.load(Ordering::Relaxed), 2);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+        // Do the same via `ensure`.
+        {
+            counter.store(0, Ordering::Relaxed);
+            let mut populated = cache
+                .ensure(&TestKey::new("2"), |dst| {
+                    dst.write_all("000".as_bytes())?;
+                    Ok(())
+                })
+                .expect("ensure must succeed");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+            let mut contents = Vec::new();
+            populated
+                .read_to_end(&mut contents)
+                .expect("read should succeed");
+            assert_eq!(contents, "000".as_bytes());
+        }
+
+        {
+            counter.store(0, Ordering::Relaxed);
+            let mut populated = cache
+                .get_or_update(
+                    &TestKey::new("3"),
+                    |_| CacheHitAction::Accept,
+                    |dst, _| {
+                        dst.write_all("000".as_bytes())?;
+                        Ok(())
+                    },
+                )
+                .expect("get_or_update must succeed");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+            let mut contents = Vec::new();
+            populated
+                .read_to_end(&mut contents)
+                .expect("read should succeed");
+            assert_eq!(contents, "000".as_bytes());
+        }
+
+        // Make sure we succeed on plain misses.
+        {
+            counter.store(0, Ordering::Relaxed);
+            let mut populated = cache
+                .get_or_update(
+                    &TestKey::new("no-such-key"),
+                    |_| CacheHitAction::Accept,
+                    |dst, _| {
+                        dst.write_all("fresh data".as_bytes())?;
+                        Ok(())
+                    },
+                )
+                .expect("get_or_update must succeed");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+            let mut contents = Vec::new();
+            populated
+                .read_to_end(&mut contents)
+                .expect("read should succeed");
+            assert_eq!(contents, "fresh data".as_bytes());
+        }
     }
 
     /// Populate two plain caches and set a consistency checker.  We
     /// should error on mismatch.
     #[test]
     fn consistency_checker_failure() {
+        use std::io::Write;
         use test_dir::{DirBuilder, FileType, TestDir};
 
         let temp = TestDir::temp()
             .create("first", FileType::Dir)
             .create("second", FileType::Dir)
             .create("first/0", FileType::ZeroFile(2))
-            .create("second/0", FileType::ZeroFile(3));
+            .create("second/0", FileType::ZeroFile(3))
+            .create("first/1", FileType::ZeroFile(1))
+            .create("second/2", FileType::ZeroFile(4));
 
         let counter = Arc::new(AtomicU64::new(0));
         let cache = CacheBuilder::new()
@@ -910,6 +1021,41 @@ mod test {
 
         // This call should error.
         assert!(cache.get(&TestKey::new("0")).is_err());
+
+        // The call should also error through `ensure`.
+        assert!(cache
+            .ensure(&TestKey::new("0"), |_| {
+                unreachable!("should detect read-cache mismatch first");
+            })
+            .is_err());
+
+        // Do the same for the files that are only in one of the two
+        // caches.
+        assert!(cache
+            .ensure(&TestKey::new("1"), |dst| {
+                dst.write_all("0000".as_bytes())?;
+                Ok(())
+            })
+            .is_err());
+
+        assert!(cache
+            .ensure(&TestKey::new("2"), |dst| {
+                dst.write_all("0".as_bytes())?;
+                Ok(())
+            })
+            .is_err());
+
+        // Same with `get_or_update`.
+        assert!(cache
+            .get_or_update(
+                &TestKey::new("2"),
+                |_| CacheHitAction::Accept,
+                |dst, _| {
+                    dst.write_all("0".as_bytes())?;
+                    Ok(())
+                }
+            )
+            .is_err());
     }
 
     /// Populate two plain caches and unset the consistency checker.  We
@@ -922,7 +1068,9 @@ mod test {
             .create("first", FileType::Dir)
             .create("second", FileType::Dir)
             .create("first/0", FileType::ZeroFile(2))
-            .create("second/0", FileType::ZeroFile(3));
+            .create("second/0", FileType::ZeroFile(3))
+            .create("first/1", FileType::ZeroFile(1))
+            .create("second/2", FileType::ZeroFile(4));
 
         let counter = Arc::new(AtomicU64::new(0));
 
@@ -939,6 +1087,34 @@ mod test {
             .expect("must succeed")
             .expect("must exist");
 
+        // And same for `ensure` calls.
+        let _ = cache
+            .ensure(&TestKey::new("0"), |_| {
+                unreachable!("should not be called");
+            })
+            .expect("must succeed");
+
+        let _ = cache
+            .ensure(&TestKey::new("1"), |_| {
+                unreachable!("should not be called");
+            })
+            .expect("must succeed");
+
+        let _ = cache
+            .ensure(&TestKey::new("2"), |_| {
+                unreachable!("should not be called");
+            })
+            .expect("must succeed");
+
+        let _ = cache
+            .get_or_update(
+                &TestKey::new("2"),
+                |_| CacheHitAction::Accept,
+                |_, _| {
+                    unreachable!("should not be called");
+                },
+            )
+            .expect("must succeed");
         // There should be no call to the checker function.
         assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
