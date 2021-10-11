@@ -11,6 +11,8 @@ use std::io::ErrorKind;
 use std::io::Result;
 use std::path::Path;
 use std::sync::Arc;
+
+use derivative::Derivative;
 use tempfile::NamedTempFile;
 
 use crate::plain::Cache as PlainCache;
@@ -18,6 +20,16 @@ use crate::sharded::Cache as ShardedCache;
 use crate::Key;
 use crate::ReadOnlyCache;
 use crate::ReadOnlyCacheBuilder;
+
+/// A `ConsistencyChecker` function compares cached values for the
+/// same key and returns `Err` when the values are incompatible.
+type ConsistencyChecker = Arc<
+    dyn Fn(&mut File, &mut File) -> Result<()>
+        + Sync
+        + Send
+        + std::panic::RefUnwindSafe
+        + std::panic::UnwindSafe,
+>;
 
 /// The `FullCache` trait exposes both read and write operations as
 /// implemented by sharded and plain caches.
@@ -103,10 +115,15 @@ impl FullCache for ShardedCache {
 /// always first access its write-side cache (if defined), and, on
 /// misses, will attempt to service [`Cache::get`] and
 /// [`Cache::touch`] calls by iterating over the read-only caches.
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct CacheBuilder {
     write_side: Option<Arc<dyn FullCache>>,
     auto_sync: bool,
+
+    #[derivative(Debug = "ignore")]
+    consistency_checker: Option<ConsistencyChecker>,
+
     read_side: ReadOnlyCacheBuilder,
 }
 
@@ -115,6 +132,7 @@ impl Default for CacheBuilder {
         CacheBuilder {
             write_side: None,
             auto_sync: true,
+            consistency_checker: None,
             read_side: Default::default(),
         }
     }
@@ -133,7 +151,8 @@ impl Default for CacheBuilder {
 /// of directories: using the same [`Cache`] object improves the
 /// accuracy of the write cache's lock-free in-memory statistics, when
 /// it's a sharded cache.
-#[derive(Clone, Debug)]
+#[derive(Clone, Derivative)]
+#[derivative(Debug)]
 pub struct Cache {
     // The write-side cache services writes and is the cache of first
     // resort for `get` and `touch`.
@@ -141,6 +160,13 @@ pub struct Cache {
     // Whether to automatically sync file contents before publishing
     // them to the write-side cache.
     auto_sync: bool,
+
+    // If provided, `Kismet` will compare results to make sure all
+    // cache levels that have a value for a given key agree ( the
+    // checker function returns `Ok(())`).
+    #[derivative(Debug = "ignore")]
+    consistency_checker: Option<ConsistencyChecker>,
+
     // The read-side cache (a list of read-only caches) services `get`
     // and `touch` calls when we fail to find something in the
     // write-side cache.
@@ -152,6 +178,7 @@ impl Default for Cache {
         Cache {
             write_side: None,
             auto_sync: true,
+            consistency_checker: None,
             read_side: Default::default(),
         }
     }
@@ -183,6 +210,52 @@ impl CacheBuilder {
     /// Returns a fresh empty builder.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the consistency checker function: when the function is
+    /// provided, the `ReadOnlyCache` will keep searching after the
+    /// first cache hit, and compare subsequent hits with the first
+    /// one by calling `checker`.  The `checker` function should
+    /// return `Ok(())` if the two files are compatible (identical),
+    /// and `Err` otherwise.
+    ///
+    /// Kismet will propagate the error on mismatch.
+    pub fn consistency_checker(
+        self,
+        checker: impl Fn(&mut File, &mut File) -> Result<()>
+            + Sync
+            + Send
+            + std::panic::RefUnwindSafe
+            + std::panic::UnwindSafe
+            + Sized
+            + 'static,
+    ) -> Self {
+        self.arc_consistency_checker(Some(Arc::new(checker)))
+    }
+
+    /// Removes the consistency checker function, if any.
+    pub fn clear_consistency_checker(self) -> Self {
+        self.arc_consistency_checker(None)
+    }
+
+    /// Sets the consistency checker function.  `None` clears the
+    /// checker function.  See [`CacheBuilder::consistency_checker`].
+    #[allow(clippy::type_complexity)] // We want the public type to be transparent
+    pub fn arc_consistency_checker(
+        mut self,
+        checker: Option<
+            Arc<
+                dyn Fn(&mut File, &mut File) -> Result<()>
+                    + Sync
+                    + Send
+                    + std::panic::RefUnwindSafe
+                    + std::panic::UnwindSafe,
+            >,
+        >,
+    ) -> Self {
+        self.consistency_checker = checker.clone();
+        self.read_side = self.read_side.arc_consistency_checker(checker);
+        self
     }
 
     /// Sets the read-write cache directory to `path`.
@@ -274,6 +347,7 @@ impl CacheBuilder {
         Cache {
             write_side: self.write_side,
             auto_sync: self.auto_sync,
+            consistency_checker: self.consistency_checker,
             read_side: self.read_side.build(),
         }
     }
@@ -331,11 +405,22 @@ impl Cache {
     pub fn get<'a>(&self, key: impl Into<Key<'a>>) -> Result<Option<File>> {
         fn doit(
             write_side: Option<&dyn FullCache>,
+            checker: Option<&ConsistencyChecker>,
             read_side: &ReadOnlyCache,
             key: Key,
         ) -> Result<Option<File>> {
+            use std::io::Seek;
+            use std::io::SeekFrom;
+
             if let Some(write) = write_side {
-                if let Some(ret) = write.get(key)? {
+                if let Some(mut ret) = write.get(key)? {
+                    if let Some(checker) = checker {
+                        if let Some(mut read_hit) = read_side.get(key)? {
+                            checker(&mut ret, &mut read_hit)?;
+                            ret.seek(SeekFrom::Start(0))?;
+                        }
+                    }
+
                     return Ok(Some(ret));
                 }
             }
@@ -345,6 +430,7 @@ impl Cache {
 
         doit(
             self.write_side.as_ref().map(AsRef::as_ref),
+            self.consistency_checker.as_ref(),
             &self.read_side,
             key.into(),
         )
@@ -353,6 +439,9 @@ impl Cache {
     /// Attempts to find a cache entry for `key`.  If there is none,
     /// populates the cache with a file filled by `populate`.  Returns
     /// a file in all cases (unless the call fails with an error).
+    ///
+    /// Always invokes `populate` for a consistency check when a
+    /// consistency check function is provided.
     ///
     /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is
     /// invalid (empty, or starts with a dot or a forward or back slash).
@@ -375,13 +464,15 @@ impl Cache {
     /// filled by `populate`; otherwise obeys the value returned by
     /// `judge` to determine what to do with the hit.
     ///
+    /// Always invokes `populate` for a consistency check when a
+    /// consistency check function is provided.
+    ///
     /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is
     /// invalid (empty, or starts with a dot or a forward or back slash).
     ///
     /// When we need to populate a new file, `populate` is called with
     /// a mutable reference to the destination file, and the old
     /// cached file (in whatever state `judge` left it), if available.
-    /// cached file, if available.
     ///
     /// See [`Cache::ensure`] for a simpler interface.
     ///
@@ -399,6 +490,9 @@ impl Cache {
         judge: impl FnOnce(CacheHit) -> CacheHitAction,
         populate: impl FnOnce(&mut File, Option<File>) -> Result<()>,
     ) -> Result<File> {
+        use std::io::Seek;
+        use std::io::SeekFrom;
+
         // Attempts to return the `FullCache` for this `Cache`.
         fn get_write_cache(this: &Cache) -> Result<&dyn FullCache> {
             match this.write_side.as_ref() {
@@ -412,8 +506,6 @@ impl Cache {
 
         // Promotes `file` to `cache`.
         fn promote(cache: &dyn FullCache, sync: bool, key: Key, mut file: File) -> Result<File> {
-            use std::io::Seek;
-
             let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
             std::io::copy(&mut file, tmp.as_file_mut())?;
 
@@ -427,7 +519,7 @@ impl Cache {
             cache.put(key, tmp.path())?;
 
             // We got a read-only file.  Rewind it before returning.
-            file.seek(std::io::SeekFrom::Start(0))?;
+            file.seek(SeekFrom::Start(0))?;
             Ok(file)
         }
 
@@ -437,6 +529,13 @@ impl Cache {
         // Overwritten with `Some(file)` when replacing `file`.
         let mut old = None;
         if let Some(mut file) = cache.get(key)? {
+            if let Some(checker) = self.consistency_checker.as_ref() {
+                if let Some(mut read) = self.read_side.get(key)? {
+                    checker(&mut file, &mut read)?;
+                    file.seek(SeekFrom::Start(0))?;
+                }
+            }
+
             match judge(CacheHit::Primary(&mut file)) {
                 // Promote is a no-op if the file is already in the write cache.
                 CacheHitAction::Accept | CacheHitAction::Promote => return Ok(file),
@@ -625,7 +724,11 @@ impl Cache {
 
 #[cfg(test)]
 mod test {
+    use std::fs::File;
     use std::io::ErrorKind;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     use crate::plain::Cache as PlainCache;
     use crate::sharded::Cache as ShardedCache;
@@ -650,6 +753,27 @@ mod test {
     impl<'a> From<&'a TestKey> for Key<'a> {
         fn from(x: &'a TestKey) -> Key<'a> {
             Key::new(&x.key, 0, 1)
+        }
+    }
+
+    fn byte_equality_checker(
+        counter: Arc<AtomicU64>,
+    ) -> impl 'static + Fn(&mut File, &mut File) -> std::io::Result<()> {
+        use std::io::Read;
+
+        move |x: &mut File, y: &mut File| {
+            let mut x_contents = Vec::new();
+            let mut y_contents = Vec::new();
+
+            counter.fetch_add(1, Ordering::Relaxed);
+            x.read_to_end(&mut x_contents)?;
+            y.read_to_end(&mut y_contents)?;
+
+            if x_contents == y_contents {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "mismatch"))
+            }
         }
     }
 
@@ -694,6 +818,129 @@ mod test {
                      Err(e) if e.kind() == ErrorKind::Unsupported)
         );
         assert!(matches!(cache.touch(&TestKey::new("foo")), Ok(false)));
+    }
+
+    /// Populate two plain caches and set a consistency checker.  We
+    /// should access both.
+    #[test]
+    fn consistency_checker_success() {
+        use std::io::Read;
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("first", FileType::Dir)
+            .create("second", FileType::Dir)
+            .create("first/0", FileType::ZeroFile(2))
+            .create("second/0", FileType::ZeroFile(2))
+            .create("first/1", FileType::RandomFile(10))
+            .create("second/2", FileType::RandomFile(10));
+
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let cache = CacheBuilder::new()
+            .plain_writer(temp.path("first"), 100)
+            .plain_reader(temp.path("second"))
+            .consistency_checker(byte_equality_checker(counter.clone()))
+            .build();
+
+        // Find a hit in both caches. The checker should be invoked.
+        {
+            let mut hit = cache
+                .get(&TestKey::new("0"))
+                .expect("must succeed")
+                .expect("must exist");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+            let mut contents = Vec::new();
+            hit.read_to_end(&mut contents).expect("read should succeed");
+            assert_eq!(contents, "00".as_bytes());
+        }
+
+        // Do the same via `ensure`.
+        {
+            let mut populated = cache
+                .ensure(&TestKey::new("0"), |_| {
+                    unreachable!("should not be called for an extant file")
+                })
+                .expect("ensure must succeed");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 2);
+
+            let mut contents = Vec::new();
+            populated
+                .read_to_end(&mut contents)
+                .expect("read should succeed");
+            assert_eq!(contents, "00".as_bytes());
+        }
+
+        let _ = cache
+            .get(&TestKey::new("1"))
+            .expect("must succeed")
+            .expect("must exist");
+        // Only found in the writer, there's nothing to check.
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+
+        let _ = cache
+            .get(&TestKey::new("2"))
+            .expect("must succeed")
+            .expect("must exist");
+        // Only found in the read cache, there's nothing to check.
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+    }
+
+    /// Populate two plain caches and set a consistency checker.  We
+    /// should error on mismatch.
+    #[test]
+    fn consistency_checker_failure() {
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("first", FileType::Dir)
+            .create("second", FileType::Dir)
+            .create("first/0", FileType::ZeroFile(2))
+            .create("second/0", FileType::ZeroFile(3));
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let cache = CacheBuilder::new()
+            .plain_writer(temp.path("first"), 100)
+            .plain_reader(temp.path("second"))
+            .consistency_checker(byte_equality_checker(counter))
+            .build();
+
+        // This call should error.
+        assert!(cache.get(&TestKey::new("0")).is_err());
+    }
+
+    /// Populate two plain caches and unset the consistency checker.  We
+    /// should not error.
+    #[test]
+    fn consistency_checker_silent_failure() {
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("first", FileType::Dir)
+            .create("second", FileType::Dir)
+            .create("first/0", FileType::ZeroFile(2))
+            .create("second/0", FileType::ZeroFile(3));
+
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let cache = CacheBuilder::new()
+            .plain_writer(temp.path("first"), 100)
+            .plain_reader(temp.path("second"))
+            .consistency_checker(byte_equality_checker(counter.clone()))
+            .clear_consistency_checker()
+            .build();
+
+        // This call should not error.
+        let _ = cache
+            .get(&TestKey::new("0"))
+            .expect("must succeed")
+            .expect("must exist");
+
+        // There should be no call to the checker function.
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 
     // Fail to find a file, ensure it, then see that we can get it.
