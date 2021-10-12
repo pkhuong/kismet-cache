@@ -441,7 +441,9 @@ impl Cache {
     /// a file in all cases (unless the call fails with an error).
     ///
     /// Always invokes `populate` for a consistency check when a
-    /// consistency check function is provided.
+    /// consistency check function is provided.  The `populate`
+    /// function can return `ErrorKind::NotFound` to skip the
+    /// comparison without failing the whole call.
     ///
     /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is
     /// invalid (empty, or starts with a dot or a forward or back slash).
@@ -465,7 +467,9 @@ impl Cache {
     /// `judge` to determine what to do with the hit.
     ///
     /// Always invokes `populate` for a consistency check when a
-    /// consistency check function is provided.
+    /// consistency check function is provided.  The `populate`
+    /// function can return `ErrorKind::NotFound` to skip the
+    /// comparison without failing the whole call.
     ///
     /// Fails with [`ErrorKind::InvalidInput`] if `key.name` is
     /// invalid (empty, or starts with a dot or a forward or back slash).
@@ -542,7 +546,12 @@ impl Cache {
 
                     if let Some(checker) = self.consistency_checker.as_ref() {
                         let mut tmp = get_tempfile()?;
-                        populate(&mut tmp, None)?;
+                        match populate(&mut tmp, None) {
+                            Err(e) if e.kind() == ErrorKind::NotFound => {
+                                return Ok(file);
+                            }
+                            ret => ret?,
+                        };
                         tmp.seek(SeekFrom::Start(0))?;
                         checker(&mut file, &mut tmp)?;
                         file.seek(SeekFrom::Start(0))?;
@@ -560,7 +569,13 @@ impl Cache {
                     if let Some(checker) = self.consistency_checker.as_ref() {
                         let mut tmp = get_tempfile()?;
 
-                        populate(&mut tmp, None)?;
+                        match populate(&mut tmp, None) {
+                            Err(e) if e.kind() == ErrorKind::NotFound => {
+                                return Ok(file);
+                            }
+                            ret => ret?,
+                        };
+
                         tmp.seek(SeekFrom::Start(0))?;
                         checker(&mut file, &mut tmp)?;
                         file.seek(SeekFrom::Start(0))?;
@@ -868,6 +883,8 @@ mod test {
     /// should access both.
     #[test]
     fn consistency_checker_success() {
+        use std::io::Error;
+        use std::io::ErrorKind;
         use std::io::Read;
         use std::io::Write;
         use test_dir::{DirBuilder, FileType, TestDir};
@@ -879,7 +896,8 @@ mod test {
             .create("second/0", FileType::ZeroFile(2))
             .create("first/1", FileType::ZeroFile(1))
             .create("second/2", FileType::ZeroFile(3))
-            .create("second/3", FileType::ZeroFile(3));
+            .create("second/3", FileType::ZeroFile(3))
+            .create("second/4", FileType::ZeroFile(4));
 
         let counter = Arc::new(AtomicU64::new(0));
 
@@ -905,14 +923,34 @@ mod test {
 
         // Do the same via `ensure`.
         {
+            counter.store(0, Ordering::Relaxed);
             let mut populated = cache
-                .ensure(&TestKey::new("0"), |dst: &mut File| {
+                .ensure(&TestKey::new("0"), |dst| {
                     dst.write_all("00".as_bytes())?;
                     Ok(())
                 })
                 .expect("ensure must succeed");
 
-            assert_eq!(counter.load(Ordering::Relaxed), 3);
+            assert_eq!(counter.load(Ordering::Relaxed), 2);
+
+            let mut contents = Vec::new();
+            populated
+                .read_to_end(&mut contents)
+                .expect("read should succeed");
+            assert_eq!(contents, "00".as_bytes());
+        }
+
+        // Now return `NotFound` from the `populate` callback,
+        // we should still succeed.
+        {
+            counter.store(0, Ordering::Relaxed);
+            let mut populated = cache
+                .ensure(&TestKey::new("0"), |_| {
+                    Err(Error::new(ErrorKind::NotFound, "not found"))
+                })
+                .expect("ensure must succeed");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
 
             let mut contents = Vec::new();
             populated
@@ -994,6 +1032,26 @@ mod test {
                 .read_to_end(&mut contents)
                 .expect("read should succeed");
             assert_eq!(contents, "000".as_bytes());
+        }
+
+        // Again, but now the `populate` callback returns `NotFound`.
+        {
+            counter.store(0, Ordering::Relaxed);
+            let mut populated = cache
+                .get_or_update(
+                    &TestKey::new("4"),
+                    |_| CacheHitAction::Accept,
+                    |_, _| Err(Error::new(ErrorKind::NotFound, "not found")),
+                )
+                .expect("get_or_update must succeed");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+            let mut contents = Vec::new();
+            populated
+                .read_to_end(&mut contents)
+                .expect("read should succeed");
+            assert_eq!(contents, "0000".as_bytes());
         }
 
         // Make sure we succeed on plain misses.
