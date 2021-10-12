@@ -1,7 +1,7 @@
 [package]
 name = "kismet-cache"
 description = "A bounded multiprocess cache of files on disk."
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Paul Khuong <pvk@pvk.ca>"]
 edition = "2018"
 license = "MIT"
