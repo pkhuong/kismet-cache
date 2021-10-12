@@ -540,10 +540,10 @@ impl Cache {
                 // Promote is a no-op if the file is already in the write cache.
                 CacheHitAction::Accept | CacheHitAction::Promote => {
                     if let Some(checker) = self.consistency_checker.as_ref() {
-                        let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
-                        populate(tmp.as_file_mut(), None)?;
-                        tmp.as_file_mut().seek(SeekFrom::Start(0))?;
-                        checker(&mut file, tmp.as_file_mut())?;
+                        let mut tmp = tempfile::tempfile_in(cache.temp_dir(key)?)?;
+                        populate(&mut tmp, None)?;
+                        tmp.seek(SeekFrom::Start(0))?;
+                        checker(&mut file, &mut tmp)?;
                         file.seek(SeekFrom::Start(0))?;
                     }
 
@@ -555,10 +555,10 @@ impl Cache {
             match judge(CacheHit::Secondary(&mut file)) {
                 j @ CacheHitAction::Accept | j @ CacheHitAction::Promote => {
                     if let Some(checker) = self.consistency_checker.as_ref() {
-                        let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
-                        populate(tmp.as_file_mut(), None)?;
-                        tmp.as_file_mut().seek(SeekFrom::Start(0))?;
-                        checker(&mut file, tmp.as_file_mut())?;
+                        let mut tmp = tempfile::tempfile_in(cache.temp_dir(key)?)?;
+                        populate(&mut tmp, None)?;
+                        tmp.seek(SeekFrom::Start(0))?;
+                        checker(&mut file, &mut tmp)?;
                         file.seek(SeekFrom::Start(0))?;
                     }
 
