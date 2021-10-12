@@ -538,6 +538,8 @@ impl Cache {
             match judge(CacheHit::Primary(&mut file)) {
                 // Promote is a no-op if the file is already in the write cache.
                 CacheHitAction::Accept | CacheHitAction::Promote => {
+                    file.seek(SeekFrom::Start(0))?;
+
                     if let Some(checker) = self.consistency_checker.as_ref() {
                         let mut tmp = get_tempfile()?;
                         populate(&mut tmp, None)?;
@@ -553,6 +555,8 @@ impl Cache {
         } else if let Some(mut file) = self.read_side.get(key)? {
             match judge(CacheHit::Secondary(&mut file)) {
                 j @ CacheHitAction::Accept | j @ CacheHitAction::Promote => {
+                    file.seek(SeekFrom::Start(0))?;
+
                     if let Some(checker) = self.consistency_checker.as_ref() {
                         let mut tmp = get_tempfile()?;
 
@@ -581,8 +585,8 @@ impl Cache {
                 // without saving the result anywhere.
                 let mut tmp = tempfile::tempfile()?;
                 populate(&mut tmp, old)?;
-                tmp.seek(SeekFrom::Start(0))?;
 
+                tmp.seek(SeekFrom::Start(0))?;
                 return Ok(tmp);
             }
         };
