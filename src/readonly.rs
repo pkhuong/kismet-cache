@@ -134,6 +134,22 @@ impl ReadOnlyCacheBuilder {
         self.arc_consistency_checker(Some(Arc::new(checker)))
     }
 
+    /// Sets the consistency checker function to
+    /// [`crate::byte_equality_checker`]: the contents of all cache
+    /// hits must be bytewise identical, without considering any
+    /// metadata.
+    pub fn byte_equality_checker(&mut self) -> &mut Self {
+        self.consistency_checker(crate::byte_equality_checker)
+    }
+
+    /// Sets the consistency checker function to
+    /// [`crate::panicking_byte_equality_checker`]: the contents of
+    /// all cache hits must be bytewise identical, without considering
+    /// any metadata, and the call will panic on mismatch.
+    pub fn panicking_byte_equality_checker(&mut self) -> &mut Self {
+        self.consistency_checker(crate::panicking_byte_equality_checker)
+    }
+
     /// Removes the consistency checker function, if any.
     pub fn clear_consistency_checker(&mut self) -> &mut Self {
         self.arc_consistency_checker(None)
@@ -510,6 +526,50 @@ mod test {
 
         // But not 2.
         assert!(ro.get(&TestKey::new("2")).expect("must succeed").is_none());
+    }
+
+    /// Use a byte equality checker with two different cache files for
+    /// the same key.  We should find an error.
+    #[test]
+    fn test_byte_equality_checker() {
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("first", FileType::Dir)
+            .create("second", FileType::Dir)
+            .create("first/0", FileType::ZeroFile(2))
+            .create("second/0", FileType::ZeroFile(3));
+
+        let ro = ReadOnlyCacheBuilder::new()
+            .plain_caches(["first", "second"].iter().map(|p| temp.path(p)))
+            .byte_equality_checker()
+            .take()
+            .build();
+
+        assert!(ro.get(&TestKey::new("0")).is_err());
+    }
+
+    /// Use a panicking byte equality checker with two different cache
+    /// files for the same key.  We should find an error.
+    #[test]
+    #[should_panic(expected = "file contents do not match")]
+    fn test_panicking_byte_equality_checker() {
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("first", FileType::Dir)
+            .create("second", FileType::Dir)
+            .create("first/0", FileType::ZeroFile(2))
+            .create("second/0", FileType::ZeroFile(3));
+
+        let ro = ReadOnlyCacheBuilder::new()
+            .plain_caches(["first", "second"].iter().map(|p| temp.path(p)))
+            .panicking_byte_equality_checker()
+            .take()
+            .build();
+
+        // We should fail before returning Err.
+        assert!(ro.get(&TestKey::new("0")).is_ok());
     }
 
     /// Populate a plain and a sharded cache. We should be able to access
