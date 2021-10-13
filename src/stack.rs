@@ -838,21 +838,9 @@ mod test {
     fn byte_equality_checker(
         counter: Arc<AtomicU64>,
     ) -> impl 'static + Fn(&mut File, &mut File) -> std::io::Result<()> {
-        use std::io::Read;
-
         move |x: &mut File, y: &mut File| {
-            let mut x_contents = Vec::new();
-            let mut y_contents = Vec::new();
-
             counter.fetch_add(1, Ordering::Relaxed);
-            x.read_to_end(&mut x_contents)?;
-            y.read_to_end(&mut y_contents)?;
-
-            if x_contents == y_contents {
-                Ok(())
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "mismatch"))
-            }
+            crate::byte_equality_checker(x, y)
         }
     }
 

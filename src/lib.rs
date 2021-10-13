@@ -242,6 +242,9 @@ pub use stack::CacheBuilder;
 pub use stack::CacheHit;
 pub use stack::CacheHitAction;
 
+use std::fs::File;
+use std::io::Result;
+
 /// Kismet cache directories put temporary files under this
 /// subdirectory in each cache or cache shard directory.
 pub const KISMET_TEMPORARY_SUBDIRECTORY: &str = ".kismet_temp";
@@ -272,4 +275,58 @@ impl<'a> Key<'a> {
             secondary_hash,
         }
     }
+}
+
+/// Compares the contents of two files, and returns `Ok(())` iff their
+/// contents are identical.
+pub fn byte_equality_checker(x: &mut File, y: &mut File) -> Result<()> {
+    use std::io::Read;
+
+    let mut x_contents = Vec::new();
+    let mut y_contents = Vec::new();
+
+    x.read_to_end(&mut x_contents)?;
+    y.read_to_end(&mut y_contents)?;
+
+    if x_contents == y_contents {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "mismatch"))
+    }
+}
+
+/// Compares the contents of two files, and panics unless their
+/// contents are identical.  Returns `Ok(())` on equality.
+pub fn panicking_byte_equality_checker(x: &mut File, y: &mut File) -> Result<()> {
+    byte_equality_checker(x, y).expect("file contents do not match");
+    Ok(())
+}
+
+#[test]
+fn test_no_panic() {
+    use test_dir::{DirBuilder, FileType, TestDir};
+
+    let temp = TestDir::temp()
+        .create("1", FileType::ZeroFile(1))
+        .create("2", FileType::ZeroFile(1));
+
+    let mut x = File::open(temp.path("1")).expect("open should succeed");
+    let mut y = File::open(temp.path("2")).expect("open should succeed");
+
+    panicking_byte_equality_checker(&mut x, &mut y).expect("should succeed");
+}
+
+#[test]
+#[should_panic(expected = "file contents do not match")]
+fn test_panic() {
+    use test_dir::{DirBuilder, FileType, TestDir};
+
+    let temp = TestDir::temp()
+        .create("1", FileType::ZeroFile(1))
+        .create("2", FileType::ZeroFile(2));
+
+    let mut x = File::open(temp.path("1")).expect("open should succeed");
+    let mut y = File::open(temp.path("2")).expect("open should succeed");
+
+    panicking_byte_equality_checker(&mut x, &mut y).expect("should panic instead of erroring");
 }
