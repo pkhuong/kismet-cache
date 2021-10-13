@@ -221,7 +221,7 @@ impl CacheBuilder {
     ///
     /// Kismet will propagate the error on mismatch.
     pub fn consistency_checker(
-        self,
+        &mut self,
         checker: impl Fn(&mut File, &mut File) -> Result<()>
             + Sync
             + Send
@@ -229,12 +229,12 @@ impl CacheBuilder {
             + std::panic::UnwindSafe
             + Sized
             + 'static,
-    ) -> Self {
+    ) -> &mut Self {
         self.arc_consistency_checker(Some(Arc::new(checker)))
     }
 
     /// Removes the consistency checker function, if any.
-    pub fn clear_consistency_checker(self) -> Self {
+    pub fn clear_consistency_checker(&mut self) -> &mut Self {
         self.arc_consistency_checker(None)
     }
 
@@ -242,7 +242,7 @@ impl CacheBuilder {
     /// checker function.  See [`CacheBuilder::consistency_checker`].
     #[allow(clippy::type_complexity)] // We want the public type to be transparent
     pub fn arc_consistency_checker(
-        mut self,
+        &mut self,
         checker: Option<
             Arc<
                 dyn Fn(&mut File, &mut File) -> Result<()>
@@ -252,7 +252,7 @@ impl CacheBuilder {
                     + std::panic::UnwindSafe,
             >,
         >,
-    ) -> Self {
+    ) -> &mut Self {
         self.consistency_checker = checker.clone();
         self.read_side.arc_consistency_checker(checker);
         self
@@ -262,7 +262,12 @@ impl CacheBuilder {
     ///
     /// The read-write cache will be a plain cache directory if
     /// `num_shards <= 1`, and a sharded directory otherwise.
-    pub fn writer(self, path: impl AsRef<Path>, num_shards: usize, total_capacity: usize) -> Self {
+    pub fn writer(
+        &mut self,
+        path: impl AsRef<Path>,
+        num_shards: usize,
+        total_capacity: usize,
+    ) -> &mut Self {
         if num_shards <= 1 {
             self.plain_writer(path, total_capacity)
         } else {
@@ -272,7 +277,7 @@ impl CacheBuilder {
 
     /// Sets the read-write cache directory to a plain directory at
     /// `path`, with a target file count of up to `capacity`.
-    pub fn plain_writer(mut self, path: impl AsRef<Path>, capacity: usize) -> Self {
+    pub fn plain_writer(&mut self, path: impl AsRef<Path>, capacity: usize) -> &mut Self {
         self.write_side.insert(Arc::new(PlainCache::new(
             path.as_ref().to_owned(),
             capacity,
@@ -284,11 +289,11 @@ impl CacheBuilder {
     /// `path`, with `num_shards` subdirectories and a target file
     /// count of up to `capacity` for the entire cache.
     pub fn sharded_writer(
-        mut self,
+        &mut self,
         path: impl AsRef<Path>,
         num_shards: usize,
         total_capacity: usize,
-    ) -> Self {
+    ) -> &mut Self {
         self.write_side.insert(Arc::new(ShardedCache::new(
             path.as_ref().to_owned(),
             num_shards,
@@ -312,7 +317,7 @@ impl CacheBuilder {
     /// e.g., via
     /// [tmpfiles.d](https://www.freedesktop.org/software/systemd/man/tmpfiles.d.html),
     /// or tagged with a [boot id](https://man7.org/linux/man-pages/man3/sd_id128_get_machine.3.html).
-    pub fn auto_sync(mut self, sync: bool) -> Self {
+    pub fn auto_sync(&mut self, sync: bool) -> &mut Self {
         self.auto_sync = sync;
         self
     }
@@ -322,23 +327,31 @@ impl CacheBuilder {
     ///
     /// Adds a plain cache directory if `num_shards <= 1`, and a sharded
     /// directory otherwise.
-    pub fn reader(mut self, path: impl AsRef<Path>, num_shards: usize) -> Self {
+    pub fn reader(&mut self, path: impl AsRef<Path>, num_shards: usize) -> &mut Self {
         self.read_side.cache(path, num_shards);
         self
     }
 
     /// Adds a new plain (unsharded) read-only cache directory at
     /// `path` to the end of the cache builder's search list.
-    pub fn plain_reader(mut self, path: impl AsRef<Path>) -> Self {
+    pub fn plain_reader(&mut self, path: impl AsRef<Path>) -> &mut Self {
         self.read_side.plain(path);
         self
     }
 
     /// Adds a new sharded read-only cache directory at `path` to the
     /// end of the cache builder's search list.
-    pub fn sharded_reader(mut self, path: impl AsRef<Path>, num_shards: usize) -> Self {
+    pub fn sharded_reader(&mut self, path: impl AsRef<Path>, num_shards: usize) -> &mut Self {
         self.read_side.sharded(path, num_shards);
         self
+    }
+
+    /// Returns the contents of `self` as a fresh value; `self` is
+    /// reset to the default empty builder state.  This makes it
+    /// possible to declare simple configurations in a single
+    /// expression, with `.take().build()`.
+    pub fn take(&mut self) -> Self {
+        std::mem::take(self)
     }
 
     /// Returns a fresh [`Cache`] for the builder's write cache and
@@ -860,7 +873,7 @@ mod test {
     // input file does not exist.
     #[test]
     fn empty_no_auto_sync() {
-        let cache = CacheBuilder::new().auto_sync(false).build();
+        let cache = CacheBuilder::new().auto_sync(false).take().build();
 
         assert!(matches!(cache.get(&TestKey::new("foo")), Ok(None)));
         assert!(matches!(
@@ -905,6 +918,7 @@ mod test {
             .plain_writer(temp.path("first"), 100)
             .plain_reader(temp.path("second"))
             .consistency_checker(byte_equality_checker(counter.clone()))
+            .take()
             .build();
 
         // Find a hit in both caches. The checker should be invoked.
@@ -1098,6 +1112,7 @@ mod test {
             .plain_writer(temp.path("first"), 100)
             .plain_reader(temp.path("second"))
             .consistency_checker(byte_equality_checker(counter))
+            .take()
             .build();
 
         // This call should error.
@@ -1160,6 +1175,7 @@ mod test {
             .plain_reader(temp.path("second"))
             .consistency_checker(byte_equality_checker(counter.clone()))
             .clear_consistency_checker()
+            .take()
             .build();
 
         // This call should not error.
@@ -1211,6 +1227,7 @@ mod test {
         let cache = CacheBuilder::new()
             .writer(temp.path("."), 1, 10)
             .auto_sync(false)
+            .take()
             .build();
         let key = TestKey::new("foo");
 
@@ -1281,6 +1298,7 @@ mod test {
         let cache = CacheBuilder::new()
             .writer(temp.path("cache"), 1, 10)
             .plain_reader(temp.path("extra_plain"))
+            .take()
             .build();
         let key = TestKey::new("foo");
 
@@ -1313,6 +1331,7 @@ mod test {
         {
             let new_cache = CacheBuilder::new()
                 .writer(temp.path("cache"), 1, 10)
+                .take()
                 .build();
             let mut fetched = new_cache
                 .get(&key)
@@ -1354,6 +1373,7 @@ mod test {
             // Make it sharded, because why not?
             .writer(temp.path("cache"), 2, 10)
             .plain_reader(temp.path("extra_plain"))
+            .take()
             .build();
         let key = TestKey::new("foo");
         let key2 = TestKey::new("bar");
@@ -1417,6 +1437,7 @@ mod test {
         {
             let new_cache = CacheBuilder::new()
                 .writer(temp.path("cache"), 2, 10)
+                .take()
                 .build();
 
             // The new cache shouldn't have the old key.
@@ -1463,6 +1484,7 @@ mod test {
             // Make it sharded, because why not?
             .writer(temp.path("cache"), 2, 10)
             .plain_reader(temp.path("extra_plain"))
+            .take()
             .build();
         let key = TestKey::new("foo");
 
@@ -1560,6 +1582,7 @@ mod test {
         {
             let new_cache = CacheBuilder::new()
                 .writer(temp.path("cache"), 2, 10)
+                .take()
                 .build();
 
             // But it should have `key2`.
@@ -1600,6 +1623,7 @@ mod test {
 
         let cache = CacheBuilder::new()
             .plain_reader(temp.path("extra_plain"))
+            .take()
             .build();
         let key = TestKey::new("foo");
         let key2 = TestKey::new("bar");
@@ -1693,6 +1717,7 @@ mod test {
         let cache = CacheBuilder::new()
             .writer(temp.path("cache"), 1, 10)
             .reader(temp.path("extra"), 1)
+            .take()
             .build();
 
         // There shouldn't be anything for "a"
@@ -1837,6 +1862,7 @@ mod test {
             .writer(temp.path("cache"), 10, 10)
             .plain_reader(temp.path("extra_plain"))
             .sharded_reader(temp.path("extra_sharded"), 10)
+            .take()
             .build();
 
         // There shouldn't be anything for "a"

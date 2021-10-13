@@ -168,6 +168,7 @@
 //! let cache = kismet_cache::CacheBuilder::new()
 //!     .sharded_writer("/tmp/root_cache", NUM_SHARDS, CAPACITY)
 //!     .plain_reader("/tmp/extra_cache")  // Try to fill cache misses here
+//!     .take()
 //!     .build();
 //!
 //! let key: CacheKey = // ...
