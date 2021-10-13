@@ -185,6 +185,20 @@ impl ReadOnlyCacheBuilder {
         self
     }
 
+    /// Adds a new plain cache directory for each path in `paths`.
+    /// The caches are appended in order to the end of the cache
+    /// builder's search list.
+    pub fn plain_caches<P>(&mut self, paths: impl IntoIterator<Item = P>) -> &mut Self
+    where
+        P: AsRef<Path>,
+    {
+        for path in paths {
+            self.plain(path);
+        }
+
+        self
+    }
+
     /// Adds a new sharded cache directory at `path` to the end of the
     /// cache builder's search list.
     pub fn sharded(&mut self, path: impl AsRef<Path>, num_shards: usize) -> &mut Self {
@@ -477,6 +491,37 @@ mod test {
 
         // There should be no call to the checker function.
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    /// Populate two plain caches.  We should read from both.
+    #[test]
+    fn two_plain_caches() {
+        use test_dir::{DirBuilder, FileType, TestDir};
+
+        let temp = TestDir::temp()
+            .create("first", FileType::Dir)
+            .create("second", FileType::Dir)
+            .create("first/0", FileType::ZeroFile(2))
+            .create("second/1", FileType::ZeroFile(3));
+
+        let ro = ReadOnlyCacheBuilder::new()
+            .plain_caches(["first", "second"].iter().map(|p| temp.path(p)))
+            .take()
+            .build();
+
+        // We should find 0 and 1.
+        let _ = ro
+            .get(&TestKey::new("0"))
+            .expect("must succeed")
+            .expect("must exist");
+
+        let _ = ro
+            .get(&TestKey::new("1"))
+            .expect("must succeed")
+            .expect("must exist");
+
+        // But not 2.
+        assert!(ro.get(&TestKey::new("2")).expect("must succeed").is_none());
     }
 
     /// Populate a plain and a sharded cache. We should be able to access
