@@ -254,7 +254,7 @@ impl CacheBuilder {
         >,
     ) -> Self {
         self.consistency_checker = checker.clone();
-        self.read_side = self.read_side.arc_consistency_checker(checker);
+        self.read_side.arc_consistency_checker(checker);
         self
     }
 
@@ -323,21 +323,21 @@ impl CacheBuilder {
     /// Adds a plain cache directory if `num_shards <= 1`, and a sharded
     /// directory otherwise.
     pub fn reader(mut self, path: impl AsRef<Path>, num_shards: usize) -> Self {
-        self.read_side = self.read_side.cache(path, num_shards);
+        self.read_side.cache(path, num_shards);
         self
     }
 
     /// Adds a new plain (unsharded) read-only cache directory at
     /// `path` to the end of the cache builder's search list.
     pub fn plain_reader(mut self, path: impl AsRef<Path>) -> Self {
-        self.read_side = self.read_side.plain(path);
+        self.read_side.plain(path);
         self
     }
 
     /// Adds a new sharded read-only cache directory at `path` to the
     /// end of the cache builder's search list.
     pub fn sharded_reader(mut self, path: impl AsRef<Path>, num_shards: usize) -> Self {
-        self.read_side = self.read_side.sharded(path, num_shards);
+        self.read_side.sharded(path, num_shards);
         self
     }
 

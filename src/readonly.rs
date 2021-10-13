@@ -122,7 +122,7 @@ impl ReadOnlyCacheBuilder {
     ///
     /// Kismet will propagate the error on mismatch.
     pub fn consistency_checker(
-        self,
+        &mut self,
         checker: impl Fn(&mut File, &mut File) -> Result<()>
             + Sync
             + Send
@@ -130,12 +130,12 @@ impl ReadOnlyCacheBuilder {
             + std::panic::UnwindSafe
             + Sized
             + 'static,
-    ) -> Self {
+    ) -> &mut Self {
         self.arc_consistency_checker(Some(Arc::new(checker)))
     }
 
     /// Removes the consistency checker function, if any.
-    pub fn clear_consistency_checker(self) -> Self {
+    pub fn clear_consistency_checker(&mut self) -> &mut Self {
         self.arc_consistency_checker(None)
     }
 
@@ -144,7 +144,7 @@ impl ReadOnlyCacheBuilder {
     /// [`ReadOnlyCacheBuilder::consistency_checker`].
     #[allow(clippy::type_complexity)] // We want the public type to be transparent
     pub fn arc_consistency_checker(
-        mut self,
+        &mut self,
         checker: Option<
             Arc<
                 dyn Fn(&mut File, &mut File) -> Result<()>
@@ -154,7 +154,7 @@ impl ReadOnlyCacheBuilder {
                     + std::panic::UnwindSafe,
             >,
         >,
-    ) -> Self {
+    ) -> &mut Self {
         self.consistency_checker = checker;
         self
     }
@@ -164,7 +164,7 @@ impl ReadOnlyCacheBuilder {
     ///
     /// Adds a plain cache directory if `num_shards <= 1`, and an
     /// actual sharded directory otherwise.
-    pub fn cache(self, path: impl AsRef<Path>, num_shards: usize) -> Self {
+    pub fn cache(&mut self, path: impl AsRef<Path>, num_shards: usize) -> &mut Self {
         if num_shards <= 1 {
             self.plain(path)
         } else {
@@ -176,7 +176,7 @@ impl ReadOnlyCacheBuilder {
     /// cache builder's search list.  A plain cache directory is
     /// merely a directory of files where the files' names match their
     /// key's name.
-    pub fn plain(mut self, path: impl AsRef<Path>) -> Self {
+    pub fn plain(&mut self, path: impl AsRef<Path>) -> &mut Self {
         self.stack.push(Box::new(PlainCache::new(
             path.as_ref().to_owned(),
             usize::MAX,
@@ -187,13 +187,21 @@ impl ReadOnlyCacheBuilder {
 
     /// Adds a new sharded cache directory at `path` to the end of the
     /// cache builder's search list.
-    pub fn sharded(mut self, path: impl AsRef<Path>, num_shards: usize) -> Self {
+    pub fn sharded(&mut self, path: impl AsRef<Path>, num_shards: usize) -> &mut Self {
         self.stack.push(Box::new(ShardedCache::new(
             path.as_ref().to_owned(),
             num_shards,
             usize::MAX,
         )));
         self
+    }
+
+    /// Returns the contents of `self` as a fresh value; `self` is
+    /// reset to the default empty builder state.  This makes it
+    /// possible to declare simple configurations in a single
+    /// expression, with `.take().build()`.
+    pub fn take(&mut self) -> Self {
+        std::mem::take(self)
     }
 
     /// Returns a fresh [`ReadOnlyCache`] for the builder's search list
@@ -386,6 +394,7 @@ mod test {
             .plain(temp.path("first"))
             .plain(temp.path("second"))
             .consistency_checker(byte_equality_checker(counter.clone()))
+            .take()
             .build();
 
         let mut hit = ro
@@ -431,6 +440,7 @@ mod test {
             .plain(temp.path("first"))
             .plain(temp.path("second"))
             .consistency_checker(byte_equality_checker(counter))
+            .take()
             .build();
 
         // This call should error.
@@ -456,6 +466,7 @@ mod test {
             .plain(temp.path("second"))
             .consistency_checker(byte_equality_checker(counter.clone()))
             .clear_consistency_checker()
+            .take()
             .build();
 
         // This call should not error.
@@ -534,6 +545,7 @@ mod test {
             let ro = ReadOnlyCacheBuilder::new()
                 .sharded(temp.path("sharded"), 10)
                 .plain(temp.path("plain"))
+                .take()
                 .build();
 
             assert!(matches!(ro.get(&TestKey::new("Missing")), Ok(None)));
@@ -579,6 +591,7 @@ mod test {
             let ro = ReadOnlyCacheBuilder::new()
                 .cache(temp.path("plain"), 1)
                 .cache(temp.path("sharded"), 10)
+                .take()
                 .build();
 
             {

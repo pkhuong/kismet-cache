@@ -122,6 +122,7 @@
 //! let read_only = kismet_cache::ReadOnlyCacheBuilder::new()
 //!     .plain("/tmp/plain_cache")  // Read first here
 //!     .sharded("/tmp/sharded_cache", NUM_SHARDS)  // Then try there.
+//!     .take()
 //!     .build();
 //!
 //! // Attempt to read the file for key "foo", with primary hash 1
