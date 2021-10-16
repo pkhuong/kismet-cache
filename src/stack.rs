@@ -393,6 +393,25 @@ impl CacheBuilder {
     }
 }
 
+/// Attempts to set the permissions on `file` to `0444`: the tempfile
+/// crate always overrides to 0600 when possible, but that doesn't
+/// really make sense for kismet: we don't want cache entries we can
+/// tell exist, but can't access.  Access control should happen via
+/// permissions on the cache directory.
+#[cfg(target_family = "unix")]
+fn fix_tempfile_permissions(file: &NamedTempFile) -> Result<()> {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+
+    file.as_file()
+        .set_permissions(Permissions::from_mode(0o444))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn fix_tempfile_permissions(_: &NamedTempFile) -> Result<()> {
+    Ok(())
+}
+
 impl Cache {
     /// Calls [`File::sync_all`] on `file` if `Cache::auto_sync`
     /// is true.
@@ -541,6 +560,7 @@ impl Cache {
         fn promote(cache: &dyn FullCache, sync: bool, key: Key, mut file: File) -> Result<File> {
             let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
             std::io::copy(&mut file, tmp.as_file_mut())?;
+            fix_tempfile_permissions(&tmp)?;
 
             // Force the destination file's contents to disk before
             // adding it to the read-write cache, if we're supposed to
@@ -651,6 +671,7 @@ impl Cache {
         // Either way, start by populating a temporary file.
         let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
         populate(tmp.as_file_mut(), old)?;
+        fix_tempfile_permissions(&tmp)?;
         self.maybe_sync(tmp.as_file())?;
 
         // Grab a read-only return value before publishing the file.
@@ -718,6 +739,7 @@ impl Cache {
     /// and we fail to [`File::sync_all`] the [`NamedTempFile`] value.
     pub fn set_temp_file<'a>(&self, key: impl Into<Key<'a>>, value: NamedTempFile) -> Result<()> {
         fn doit(this: &Cache, key: Key, value: NamedTempFile) -> Result<()> {
+            fix_tempfile_permissions(&value)?;
             this.maybe_sync(value.as_file())?;
             this.set_impl(key, value.path())
         }
@@ -775,6 +797,7 @@ impl Cache {
     /// and we fail to [`File::sync_all`] the [`NamedTempFile`] value.
     pub fn put_temp_file<'a>(&self, key: impl Into<Key<'a>>, value: NamedTempFile) -> Result<()> {
         fn doit(this: &Cache, key: Key, value: NamedTempFile) -> Result<()> {
+            fix_tempfile_permissions(&value)?;
             this.maybe_sync(value.as_file())?;
             this.put_impl(key, value.path())
         }
