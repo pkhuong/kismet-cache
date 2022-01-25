@@ -47,6 +47,7 @@ impl MultiplicativeHash {
     }
 
     /// Constructs a new pseudorandom `MultiplicativeHash`.
+    #[cfg(test)]
     pub fn new_random() -> MultiplicativeHash {
         use rand::Rng;
 
