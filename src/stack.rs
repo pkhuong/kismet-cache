@@ -407,7 +407,7 @@ fn fix_tempfile_permissions(file: &NamedTempFile) -> Result<()> {
         .set_permissions(Permissions::from_mode(0o444))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(target_family = "unix"))]
 fn fix_tempfile_permissions(_: &NamedTempFile) -> Result<()> {
     Ok(())
 }
