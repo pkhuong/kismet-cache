@@ -17,4 +17,4 @@ tempfile = "3"
 [dev-dependencies]
 proptest = "1"
 proptest-derive = "0.3"
-test_dir = "0.1"
+test_dir = "0.2"
