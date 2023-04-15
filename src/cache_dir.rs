@@ -72,7 +72,7 @@ fn cleanup_temporary_directory(temp_dir: Cow<Path>) -> Result<()> {
 /// Returns `name` if it non-empty and does not start with a reserved
 /// byte (dot, slash, backslash).
 fn validate_file_name(name: &str) -> Result<&str> {
-    match name.as_bytes().get(0) {
+    match name.as_bytes().first() {
         None => Err(Error::new(
             ErrorKind::InvalidInput,
             "kismet cached file name must not be empty",
