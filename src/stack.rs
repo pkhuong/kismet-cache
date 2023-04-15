@@ -438,7 +438,7 @@ impl Cache {
             // It's really not clear what happens to a file's content
             // if we open it just before fsync, and fsync fails.  It
             // should be safe to just unlink the file
-            std::fs::File::open(&path)?
+            std::fs::File::open(path)?
                 .sync_all()
                 .expect("auto_sync failed, and failure semantics are unclear for fsync");
         }

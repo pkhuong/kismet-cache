@@ -307,7 +307,7 @@ impl ReadOnlyCache {
             return Ok(None);
         }
 
-        doit(&*self.stack, &self.consistency_checker, key.into())
+        doit(&self.stack, &self.consistency_checker, key.into())
     }
 
     /// Marks a cache entry for `key` as accessed (read).  The
@@ -338,7 +338,7 @@ impl ReadOnlyCache {
             return Ok(false);
         }
 
-        doit(&*self.stack, key.into())
+        doit(&self.stack, key.into())
     }
 }
 
