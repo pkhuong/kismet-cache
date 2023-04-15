@@ -294,7 +294,7 @@ impl CacheBuilder {
     /// Sets the read-write cache directory to a plain directory at
     /// `path`, with a target file count of up to `capacity`.
     pub fn plain_writer(&mut self, path: impl AsRef<Path>, capacity: usize) -> &mut Self {
-        self.write_side.insert(Arc::new(PlainCache::new(
+        let _ = self.write_side.insert(Arc::new(PlainCache::new(
             path.as_ref().to_owned(),
             capacity,
         )));
@@ -310,7 +310,7 @@ impl CacheBuilder {
         num_shards: usize,
         total_capacity: usize,
     ) -> &mut Self {
-        self.write_side.insert(Arc::new(ShardedCache::new(
+        let _ = self.write_side.insert(Arc::new(ShardedCache::new(
             path.as_ref().to_owned(),
             num_shards,
             total_capacity,
