@@ -19,6 +19,16 @@ use std::path::PathBuf;
 
 use crate::second_chance;
 
+/// When clearing the accessed bit on a file, make sure atime is this
+/// many seconds before mtime: some filesystems force relatime,
+/// potentially with a coarse timestamp granularity. Setting atime
+/// clearly earlier than mtime will force a relatime update on the
+/// next access.
+///
+/// The current value, at 2 minutes, should be large enough for most
+/// filesystems (usual coarse granularities are 1-2 seconds).
+const ENFORCED_ATIME_MTIME_DELTA_SEC: i64 = 120;
+
 /// A `CachedFile` represents what we know about a given file in a raw
 /// cache directory: its direntry, mtime, and atime.
 struct CachedFile {
@@ -38,7 +48,17 @@ fn ensure_file_removed(path: &Path) -> Result<()> {
 
 /// Moves the file at `path` to the back of the second chance list.
 fn move_to_back_of_list(path: &Path) -> Result<()> {
-    filetime::set_file_mtime(path, FileTime::now())
+    let mtime = FileTime::now();
+    // Make sure the atime is firmly in the past compared to mtime,
+    // and preserve the "fraction of a second" part to hint at the
+    // artificial relationship with mtime.
+    let atime = FileTime::from_unix_time(
+        mtime
+            .unix_seconds()
+            .saturating_sub(ENFORCED_ATIME_MTIME_DELTA_SEC),
+        mtime.nanoseconds(),
+    );
+    filetime::set_file_times(path, atime, mtime)
 }
 
 /// Marks the file at `path` as read-only.
