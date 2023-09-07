@@ -3,6 +3,14 @@
 /// with `const fn` keyed constructors, and pair that with a range
 /// reduction function from `u64` to a `usize` range that extends
 /// Dietzfelbinger's power-of-two scheme.
+///
+/// For a truly faithful implementation of Dietzfelbinger's
+/// multiply-add-shift for 64-bit domain and range, we'd want 128-bit
+/// multiplier and addend.  This 64-bit version is faster and good
+/// enough for the cases we care about: we shouldn't need that many
+/// bits to assign a cache shard, and the multiplicative hash is only
+/// used as a last resort mixer to avoid really bad behaviour when the
+/// `Key`s' hashes are clusters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct MultiplicativeHash {
     // Pseudorandom odd multiplier
@@ -11,7 +19,7 @@ pub(crate) struct MultiplicativeHash {
     addend: u64,
 }
 
-/// Maps vaues in `[0, u64::MAX]` to `[0, domain)` linearly.
+/// Maps values in `[0, u64::MAX]` to `[0, domain)` linearly.
 ///
 /// As a special case, this function returns 0 instead of erroring out
 /// when `domain == 0`.
