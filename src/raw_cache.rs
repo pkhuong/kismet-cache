@@ -65,6 +65,11 @@ fn move_to_back_of_list(path: &Path) -> Result<()> {
 fn set_read_only(path: &Path) -> Result<()> {
     let mut permissions = std::fs::symlink_metadata(path)?.permissions();
 
+    // Unconditionally set the permissions, even if there's no change:
+    // we expect to actually do something, and we rely on the chmod
+    // call to flush client-side NFS write caches.
+    //
+    // See comment in `insert_or_update`.
     permissions.set_readonly(true);
     std::fs::set_permissions(path, permissions)
 }
@@ -108,6 +113,33 @@ pub fn insert_or_update(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<
         // Move to the back of the list before publishing: if a reader
         // comes in right away, we want it to set the access bit.
         move_to_back_of_list(from)?;
+
+        // Important to set_read_only before publishing the file:
+        // client-side caching for NFS (and probably other network
+        // filesystems) can let the rename go through before sending
+        // the file's contents to the server.
+        //
+        // At least on Linux, this chmod is guaranteed to flush any
+        // buffered write (without synchronously waiting for the
+        // server to ack the write like fsync would), while the
+        // rename won't.
+        //
+        // Trond Myklebust (https://www.spinics.net/lists/linux-nfs/msg46489.html):
+        //
+        //    In NFSv3, the close() will cause the client to flush all
+        //    data to stable storage. The client will also flush data
+        //    to stable storage on a chmod, since that could
+        //    potentially affect its ability to write back the
+        //    data. It will not bother to do so for rename.
+        //
+        // According to http://tss.iki.fi/nfs-coding-howto.html#nfstest,
+        // this is still true for Linux's NFSv4 client.
+        //
+        // The lack of implicit flush before rename isn't an issue in
+        // safe situations where the cache is configured to sync
+        // before publishing files, but we should still avoid strange
+        // failure modes when autosync is disabled (e.g., because the
+        // cache's contents can be recovered).
         set_read_only(from)?;
         std::fs::rename(from, to)?;
         ensure_file_removed(from)
@@ -139,6 +171,7 @@ pub fn insert_or_touch(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<(
         // to only `insert_or_touch` after a failed lookup, so the `link`
         // call will only fail with EEXIST if another writer raced with us.
         move_to_back_of_list(from)?;
+        // This chmod is load-bearing on NFS; see comment in `insert_or_update`.
         set_read_only(from)?;
         match std::fs::hard_link(from, to) {
             Ok(()) => {}
