@@ -193,7 +193,7 @@ fn smoke_test() {
     // The temporary garbage file must have been deleted by now.
     assert!(
         matches!(std::fs::metadata(temp.path(&format!("{}/garbage", TEMP_SUBDIR))),
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+                 Err(e) if e.kind() == std::io::ErrorKind::NotFound)
     );
 }
 

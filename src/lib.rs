@@ -225,6 +225,7 @@
 //! is always safe for an application to store additional data in
 //! files or directories that start with a `.`, as long as they do not
 //! collide with the `.kismet` prefix.
+mod benign_error;
 mod cache_dir;
 mod multiplicative_hash;
 pub mod plain;
