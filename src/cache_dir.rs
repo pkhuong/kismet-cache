@@ -7,6 +7,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::benign_error::is_absent_file_error;
 use crate::raw_cache;
 use crate::trigger::PeriodicTrigger;
 
@@ -42,7 +43,7 @@ fn cleanup_temporary_directory(temp_dir: Cow<Path>) -> Result<()> {
     };
 
     let iter = match std::fs::read_dir(&temp_dir) {
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) if is_absent_file_error(&e) => return Ok(()),
         x => x?,
     };
 
@@ -125,7 +126,7 @@ pub(crate) trait CacheDir {
 
         match File::open(&target) {
             Ok(file) => Ok(Some(file)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if is_absent_file_error(&e) => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -141,7 +142,7 @@ pub(crate) trait CacheDir {
     fn definitely_cleanup(&self, base_dir: PathBuf) -> Result<u64> {
         let ret = match raw_cache::prune(base_dir, self.capacity()) {
             Ok((estimate, _deleted)) => estimate,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(0),
+            Err(e) if is_absent_file_error(&e) => return Ok(0),
             Err(e) => return Err(e),
         };
 

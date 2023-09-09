@@ -17,6 +17,7 @@ use std::io::Result;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::benign_error::is_absent_file_error;
 use crate::second_chance;
 
 /// When clearing the accessed bit on a file, make sure atime is this
@@ -41,7 +42,7 @@ struct CachedFile {
 fn ensure_file_removed(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) if is_absent_file_error(&e) => Ok(()),
         err => err,
     }
 }
@@ -81,13 +82,16 @@ fn set_read_only(path: &Path) -> Result<()> {
 /// In most cases, there is no need to explicitly call this function:
 /// the operating system will automatically perform the required
 /// update while opening the file at `path`.
+///
+/// If someone's running this on CephFS, we unfortunately would have
+/// to explicitly touch on every access: CephFS doesn't atime at all(!?).
 pub fn touch(path: impl AsRef<Path>) -> Result<bool> {
     fn run(path: &Path) -> Result<bool> {
         match filetime::set_file_atime(path, FileTime::now()) {
             Ok(()) => Ok(true),
             // It's OK if the file we're trying to touch was removed:
             // things do disappear from caches.
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+            Err(e) if is_absent_file_error(&e) => Ok(false),
             Err(e) => Err(e),
         }
     }
@@ -231,7 +235,7 @@ fn collect_cached_files(cache_dir: &Path) -> Result<(Vec<CachedFile>, u64)> {
         if let Ok(entry) = maybe_entry {
             let meta = match entry.metadata() {
                 Ok(meta) => meta,
-                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) if is_absent_file_error(&e) => continue,
                 err => err?,
             };
 
@@ -267,7 +271,7 @@ fn apply_update(parent: PathBuf, update: second_chance::Update<CachedFile>) -> R
         match move_to_back_of_list(&cached) {
             Ok(()) => {}
             // Silently ignore ENOENT: things do disappear from caches.
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) if is_absent_file_error(&e) => {}
             err => err?,
         }
         cached.pop();
