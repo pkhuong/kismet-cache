@@ -398,7 +398,12 @@ impl CacheBuilder {
 /// really make sense for kismet: we don't want cache entries we can
 /// tell exist, but can't access.  Access control should happen via
 /// permissions on the cache directory.
-#[cfg(target_family = "unix")]
+///
+/// This is the only place where Kismet is expected to loosen file
+/// access permissions: Kismet does tweak permissions just before
+/// renaming/linking files to their final destination, but only to
+/// *remove* write access, never to add it.
+#[cfg(all(target_family = "unix", not(target_os = "wasi")))]  // https://github.com/Stebalien/tempfile/blob/8ae928c5f9719664a2e40f8f6c904eab06db122b/src/file/imp/unix.rs#L25C15-L25C33
 fn fix_tempfile_permissions(file: &NamedTempFile) -> Result<()> {
     use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt;
@@ -407,8 +412,14 @@ fn fix_tempfile_permissions(file: &NamedTempFile) -> Result<()> {
         .set_permissions(Permissions::from_mode(0o444))
 }
 
+#[cfg(target_os = "wasi")]
+fn fix_tempfile_permissions(file: &NamedTempFile) -> Result<()> {
+    Ok(())
+}
+
 #[cfg(not(target_family = "unix"))]
 fn fix_tempfile_permissions(_: &NamedTempFile) -> Result<()> {
+    unimplemented!("Don't know how to fix tempfile permissions on non-unix OSes.");
     Ok(())
 }
 
