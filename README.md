@@ -1,6 +1,6 @@
 Kismet: a Second Chance cache for files on disk
 ===============================================
-[![Crates.io](https://img.shields.io/crates/v/kismet-cache)](https://crates.io/crates/kismet-cache) [![docs.rs](https://img.shields.io/docsrs/kismet-cache)](https://docs.rs/kismet-cache) [![Build Status](https://app.travis-ci.com/pkhuong/kismet-cache.svg?branch=main)](https://app.travis-ci.com/pkhuong/kismet-cache) [![Coverage Status](https://coveralls.io/repos/github/pkhuong/kismet-cache/badge.svg?branch=main)](https://coveralls.io/github/pkhuong/kismet-cache?branch=main)
+[![Crates.io](https://img.shields.io/crates/v/kismet-cache)](https://crates.io/crates/kismet-cache) [![docs.rs](https://img.shields.io/docsrs/kismet-cache)](https://docs.rs/kismet-cache) [![Unified pipeline](https://github.com/pkhuong/kismet-cache/actions/workflows/unified.yml/badge.svg)](https://github.com/pkhuong/kismet-cache/actions/workflows/unified.yml) [![Coverage Status](https://coveralls.io/repos/github/pkhuong/kismet-cache/badge.svg?branch=main)](https://coveralls.io/github/pkhuong/kismet-cache?branch=main)
 
 Kismet implements multiprocess lock-free crash-safe and (roughly)
 bounded persistent caches stored in filesystem directories, with a
