@@ -36,7 +36,8 @@ jobs:
         path: cobertura.xml
 
     - name: Install clippy
-       run: rustup component add clippy
+      run: rustup component add clippy
+
     - name: Run clippy
       uses: actions-rs/clippy-check@v1
       with:
