@@ -20,11 +20,19 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
-    - name: Run cargo-tarpaulin
-      uses: actions-rs/tarpaulin@v0.1
+    - name: Install clippy
+      run: rustup component add clippy
+
+    - name: Run clippy
+      uses: actions-rs/clippy-check@v1
       with:
-        version: '0.15.0'
-        args: '-- --test-threads 1'
+        token: ${{ secrets.GITHUB_TOKEN }}
+        args: --all-features
+
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+    - name: Generate code coverage
+      run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 
     - name: Upload to coveralls
       uses: coverallsapp/github-action@v2
@@ -35,11 +43,3 @@ jobs:
         name: code-coverage-report
         path: cobertura.xml
 
-    - name: Install clippy
-      run: rustup component add clippy
-
-    - name: Run clippy
-      uses: actions-rs/clippy-check@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        args: --all-features
