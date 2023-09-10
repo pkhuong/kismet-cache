@@ -393,46 +393,75 @@ impl CacheBuilder {
     }
 }
 
-/// Attempts to set the permissions on `file` to `0444`: the tempfile
-/// crate always overrides to 0600 when possible, but that doesn't
-/// really make sense for kismet: we don't want cache entries we can
-/// tell exist, but can't access.  Access control should happen via
-/// permissions on the cache directory.
+fn rc_to_error(rc: i32) -> Result<()> {
+    if rc >= 0 {
+        Ok(())
+    } else {
+        Err(Error::last_os_error())
+    }
+}
+
+/// Prepares a NamedTempFile for publishing as a cached value.
+///
+/// The file must be made world readable (0600 probably isn't right),
+/// fsync-ed if `sync` is true, and then closed... but the path on
+/// disk itself kept alive and returned to the caller.
 ///
 /// This is the only place where Kismet is expected to loosen file
 /// access permissions: Kismet does tweak permissions just before
 /// renaming/linking files to their final destination, but only to
 /// *remove* write access, never to add it.
-#[cfg(all(target_family = "unix", not(target_os = "wasi")))]  // https://github.com/Stebalien/tempfile/blob/8ae928c5f9719664a2e40f8f6c904eab06db122b/src/file/imp/unix.rs#L25C15-L25C33
-fn fix_tempfile_permissions(file: &NamedTempFile) -> Result<()> {
-    use std::fs::Permissions;
-    use std::os::unix::fs::PermissionsExt;
+///
+/// N.B., the permissions are always set to `0444`, regardless of
+/// umash. Access control should happen via permissions on the cache
+/// directory: it's not useful (or maybe even an information leak)
+/// to be able to tell an entry exists without accessing it.
+fn finalize_tempfile(tempfile: NamedTempFile, sync: bool) -> Result<tempfile::TempPath> {
+    #[cfg(all(target_family = "unix", not(target_os = "wasi")))] // https://github.com/Stebalien/tempfile/blob/8ae928c5f9719664a2e40f8f6c904eab06db122b/src/file/imp/unix.rs#L25C15-L25C33
+    fn fix_tempfile_permissions(file: &NamedTempFile) -> Result<()> {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
 
-    file.as_file()
-        .set_permissions(Permissions::from_mode(0o444))
-}
+        file.as_file()
+            .set_permissions(Permissions::from_mode(0o444))
+    }
 
-#[cfg(target_os = "wasi")]
-fn fix_tempfile_permissions(file: &NamedTempFile) -> Result<()> {
-    Ok(())
-}
+    #[cfg(target_os = "wasi")]
+    fn fix_tempfile_permissions(file: &NamedTempFile) -> Result<()> {
+        Ok(())
+    }
 
-#[cfg(not(target_family = "unix"))]
-fn fix_tempfile_permissions(_: &NamedTempFile) -> Result<()> {
-    unimplemented!("Don't know how to fix tempfile permissions on non-unix OSes.");
-    Ok(())
+    fix_tempfile_permissions(&tempfile)?;
+
+    let (file, path) = tempfile.into_parts();
+    if sync {
+        file.sync_all()?;
+    }
+
+    // On unix, closing a file can fail and signal important
+    // information (e.g., with NFS)... bubble that up.
+    #[cfg(target_family = "unix")]
+    fn close(file: File) -> Result<()> {
+        use std::os::fd::IntoRawFd;
+        rc_to_error(unsafe { libc::close(file.into_raw_fd()) })
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    fn close(file: File) -> Result<()> {
+        Ok(())
+    }
+
+    close(file)?;
+    Ok(path)
 }
 
 impl Cache {
-    /// Calls [`File::sync_all`] on `file` if `Cache::auto_sync`
-    /// is true.
+    /// Finalizes a [`NamedTempFile`]; that includes calling
+    /// [`File::sync_all`] on the underlying file if
+    /// `Cache::auto_sync` is true.
     #[inline]
-    fn maybe_sync(&self, file: &File) -> Result<()> {
-        if self.auto_sync {
-            file.sync_all()
-        } else {
-            Ok(())
-        }
+    fn finalize_tempfile(&self, file: NamedTempFile) -> Result<tempfile::TempPath> {
+        finalize_tempfile(file, self.auto_sync)
     }
 
     /// Opens `path` and calls [`File::sync_all`] on the resulting
@@ -571,18 +600,10 @@ impl Cache {
         fn promote(cache: &dyn FullCache, sync: bool, key: Key, mut file: File) -> Result<File> {
             let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
             std::io::copy(&mut file, tmp.as_file_mut())?;
-            fix_tempfile_permissions(&tmp)?;
+            let path = finalize_tempfile(tmp, sync)?;
+            cache.put(key, &path)?;
 
-            // Force the destination file's contents to disk before
-            // adding it to the read-write cache, if we're supposed to
-            // sync files automatically.
-            if sync {
-                tmp.as_file().sync_all()?;
-            }
-
-            cache.put(key, tmp.path())?;
-
-            // We got a read-only file.  Rewind it before returning.
+            // We already have a read-only file.  Rewind it before returning.
             file.seek(SeekFrom::Start(0))?;
             Ok(file)
         }
@@ -682,16 +703,15 @@ impl Cache {
         // Either way, start by populating a temporary file.
         let mut tmp = NamedTempFile::new_in(cache.temp_dir(key)?)?;
         populate(tmp.as_file_mut(), old)?;
-        fix_tempfile_permissions(&tmp)?;
-        self.maybe_sync(tmp.as_file())?;
+
+        let path = self.finalize_tempfile(tmp)?;
 
         // Grab a read-only return value before publishing the file.
-        let path = tmp.path();
-        let mut ret = File::open(path)?;
+        let mut ret = File::open(&path)?;
         if replace {
-            cache.set(key, path)?;
+            cache.set(key, &path)?;
         } else {
-            cache.put(key, path)?;
+            cache.put(key, &path)?;
             // Return the now-cached file, if we can get it.
             if let Ok(Some(file)) = cache.get(key) {
                 ret = file;
@@ -750,9 +770,8 @@ impl Cache {
     /// and we fail to [`File::sync_all`] the [`NamedTempFile`] value.
     pub fn set_temp_file<'a>(&self, key: impl Into<Key<'a>>, value: NamedTempFile) -> Result<()> {
         fn doit(this: &Cache, key: Key, value: NamedTempFile) -> Result<()> {
-            fix_tempfile_permissions(&value)?;
-            this.maybe_sync(value.as_file())?;
-            this.set_impl(key, value.path())
+            let path = this.finalize_tempfile(value)?;
+            this.set_impl(key, &path)
         }
 
         doit(self, key.into(), value)
@@ -808,9 +827,8 @@ impl Cache {
     /// and we fail to [`File::sync_all`] the [`NamedTempFile`] value.
     pub fn put_temp_file<'a>(&self, key: impl Into<Key<'a>>, value: NamedTempFile) -> Result<()> {
         fn doit(this: &Cache, key: Key, value: NamedTempFile) -> Result<()> {
-            fix_tempfile_permissions(&value)?;
-            this.maybe_sync(value.as_file())?;
-            this.put_impl(key, value.path())
+            let path = this.finalize_tempfile(value)?;
+            this.put_impl(key, &path)
         }
 
         doit(self, key.into(), value)
@@ -849,6 +867,40 @@ impl Cache {
             key.into(),
         )
     }
+}
+
+#[test]
+fn test_rc_to_error() {
+    #[cfg(target_os = "linux")]
+    fn set_errno(value: i32) {
+        unsafe { *libc::__errno_location() = value };
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_errno(value: i32) {
+        unsafe { *libc::__error() = value };
+    }
+
+    set_errno(0);
+    assert!(rc_to_error(0).is_ok());
+
+    set_errno(libc::ESTALE);
+    assert!(rc_to_error(0).is_ok());
+
+    set_errno(libc::ESTALE);
+    assert_eq!(
+        rc_to_error(-1).err().unwrap().raw_os_error(),
+        Some(libc::ESTALE)
+    );
+
+    // Closing an invalid FD will obviously fail
+    assert_eq!(
+        rc_to_error(unsafe { libc::close(-1) })
+            .err()
+            .unwrap()
+            .raw_os_error(),
+        Some(libc::EBADF)
+    );
 }
 
 #[cfg(test)]
