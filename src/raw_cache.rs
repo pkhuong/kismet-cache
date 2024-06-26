@@ -82,9 +82,11 @@ fn set_read_only(path: &Path) -> Result<()> {
 /// In most cases, there is no need to explicitly call this function:
 /// the operating system will automatically perform the required
 /// update while opening the file at `path`.
-///
-/// If someone's running this on CephFS, we unfortunately would have
-/// to explicitly touch on every access: CephFS doesn't atime at all(!?).
+/// 
+/// That's why the cache dir module calls `ensures_file_touched` after
+/// opening a file, to update atime only when the filesystem didn't
+/// already do it for us as part of `open(2)` (e.g., CephFS and sometimes
+/// EFS).
 pub fn touch(path: impl AsRef<Path>) -> Result<bool> {
     fn run(path: &Path) -> Result<bool> {
         match filetime::set_file_atime(path, FileTime::now()) {
@@ -97,6 +99,28 @@ pub fn touch(path: impl AsRef<Path>) -> Result<bool> {
     }
 
     run(path.as_ref())
+}
+
+/// Touches `file` if it's not already marked as accessed by `open`.
+pub fn ensure_file_touched(file: &std::fs::File) -> Result<()> {
+  // This `stat(2)` call is relatively cheap because most of the
+  // time, readers will stat the file to find its size.  So any
+  // I/O is probably just paying for something that would have to
+  // be done (and then cached by the OS) anyway.
+  //
+  // That's not to say syscalls are free, but just one extra syscall
+  // without extra I/O is a small price to pay for obvious correctness,
+  // even on weird networked filesystems with relaxed atime updates.
+  let meta = file.metadata()?;
+
+  let atime = FileTime::from_last_access_time(&meta);
+  let mtime = FileTime::from_last_modification_time(&meta);
+
+  if atime < mtime {
+    filetime::set_file_handle_times(file, Some(mtime), None)?;
+  }
+
+  Ok(())
 }
 
 /// Consumes the file `from` and publishes it to the raw cache file
@@ -215,7 +239,7 @@ impl CachedFile {
         CachedFile {
             entry,
             mtime,
-            accessed: atime > mtime,
+            accessed: atime >= mtime,
         }
     }
 }
@@ -469,7 +493,11 @@ fn test_touch_by_open() {
     assert!(!old_entry.accessed());
 
     advance_time();
-    let _ = std::fs::read(&path).expect("read should succeed");
+
+    let file = std::fs::File::open(&path).expect("open should succeed");
+    ensure_file_touched(&file).expect("touch should succeed");
+    std::mem::drop(file);
+    
     let new_entry = get_entry();
 
     assert_eq!(new_entry.rank(), old_entry.rank());
