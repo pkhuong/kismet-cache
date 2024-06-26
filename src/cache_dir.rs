@@ -125,7 +125,10 @@ pub(crate) trait CacheDir {
         target.push(name);
 
         match File::open(&target) {
-            Ok(file) => Ok(Some(file)),
+            Ok(file) => {
+                let _ = raw_cache::ensure_file_touched(&file);
+                Ok(Some(file))
+            },
             Err(e) if is_absent_file_error(&e) => Ok(None),
             Err(e) => Err(e),
         }
