@@ -18,7 +18,7 @@ use std::cell::RefCell;
 // Whenever we would decrement it to 0 (or less), we instead trigger
 // the periodic behaviour and regenerate a new uniform.
 std::thread_local! {
-    static COUNTER: RefCell<u64> = RefCell::new(0);
+    static COUNTER: RefCell<u64> = const { RefCell::new(0) };
 }
 
 /// Resets `c` with a new positive random uniform value and returns
