@@ -269,7 +269,7 @@ impl CacheBuilder {
             >,
         >,
     ) -> &mut Self {
-        self.consistency_checker = checker.clone();
+        self.consistency_checker.clone_from(&checker);
         self.read_side.arc_consistency_checker(checker);
         self
     }
